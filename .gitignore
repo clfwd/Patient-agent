@@ -1,0 +1,13 @@
+.env
+.idea/
+.venv/
+.venv_py38_backup_20260510/
+frontend/dist/
+frontend/node_modules/
+frontend/*.tsbuildinfo
+generated_audio/
+patient_agent.db
+tmp_tts_test.wav
+uploaded_images/
+__pycache__/
+*.pyc
