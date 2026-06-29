@@ -97,7 +97,11 @@ Phase 0 仅接入 LangGraph 依赖和配置开关，默认仍走现有单 Agent 
 
 如果 `AGENT_GRAPH_ENABLED=true` 且 `AGENT_GRAPH_REQUIRE_LANGGRAPH=true`，但 `langgraph` 不可导入，Agent service 初始化会返回 `langgraph_dependency_missing`。如果 `AGENT_GRAPH_REQUIRE_LANGGRAPH=false`，后续 graph 路径应允许回退到旧链路。
 
-开启 LangGraph 编排后，`agent_trace.stage` 不再限定为 `preflight / tool_calling / postprocess`，还会出现 `graph_preflight / graph_router / graph_composer / graph_postprocess` 等节点名。
+开启 LangGraph 编排后，`agent_trace.stage` 不再限定为 `preflight / tool_calling / postprocess`，还会出现 `graph_preflight / graph_planner / graph_dispatcher / graph_memory_agent / graph_patient_data_agent / graph_image_analysis_agent / graph_medical_knowledge_agent / graph_join / graph_gap_checker / graph_composer / graph_postprocess` 等节点名。
+
+Phase 3.1 起，graph dispatcher 会通过 LangGraph `Send` 将同一轮 ready task 派发到多个 worker 分支。`max_parallel_tasks` 当前在 graph state 中默认是 `4`，用于限制单轮并行任务数。worker 只返回增量 `task_results`、`worker_events`、`evidence_items`、`tool_calls` 与 `agent_trace`，由 `graph_join` 统一更新 `task_board`。
+
+如果在本地使用 SQLite 内存库运行测试，真实数据库读写不适合作为并行压力测试；项目测试以 router / node 单元测试验证 `Send` 分发和状态合并，API 测试继续覆盖各 worker 的业务闭环。生产或联调环境建议优先使用文件 SQLite 或 PostgreSQL 进行多 worker 综合请求验证。
 
 ### 5.4 长期记忆服务不可用
 

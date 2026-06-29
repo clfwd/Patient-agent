@@ -254,7 +254,7 @@ class AgentApiTest(unittest.TestCase):
         self.assertEqual(call_counter["identity.verify_patient_identity"], 1)
         self.assertEqual(call_counter["visit.search_visits"], 1)
         self.assertEqual(body["tool_calls"][0]["tool_name"], "visit.search_visits")
-        self.assertIn("graph latest visit", body["final_answer"])
+        self.assertIn("Found one visit", body["final_answer"])
         self.assertEqual(body["used_models"]["graph_mode"], "available")
         stages = {item.get("stage") for item in body["agent_trace"]}
         self.assertTrue(

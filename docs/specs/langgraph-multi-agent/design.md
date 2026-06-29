@@ -312,3 +312,35 @@ Graph state 建议字段：
   - 通用医学知识问题。
   - 结合患者病历的问题。
   - 高风险症状问题。
+## Phase 3.1 Send 并行调度设计
+
+Phase 3.1 将 Phase 3 的串行 task board 调度升级为 LangGraph `Send` 并行派发：
+
+```text
+graph_preflight
+  -> graph_planner
+  -> graph_dispatcher
+      -> Send(graph_memory_agent)
+      -> Send(graph_patient_data_agent)
+      -> Send(graph_image_analysis_agent)
+      -> Send(graph_medical_knowledge_agent)
+  -> graph_join
+  -> graph_gap_checker
+      -> graph_dispatcher 或 graph_composer
+  -> graph_postprocess
+```
+
+核心约束：
+
+- `graph_dispatcher` 一次选出多个 ready task，并按 `priority desc, task_id asc` 稳定排序。
+- `max_parallel_tasks` 默认值为 `4`，限制单轮派发宽度。
+- 每个 `Send` 分支携带自己的 `current_task`，worker 不再依赖全局唯一任务。
+- worker 只返回增量 patch：`task_results`、`worker_events`、`evidence_items`、`tool_calls`、`agent_trace`。
+- `AgentState` 对并行写入字段增加 reducer：list 字段前缀感知合并，`plan` 去重合并，`task_results` 字典合并。
+- `graph_join` 仍是唯一更新 `task_board` 状态的节点。
+- `graph_composer` 在已有 worker 输出时不再调用旧 tool-calling loop，避免图片等工具在 worker 和 composer 中重复执行。
+
+测试边界：
+
+- SQLite 内存库使用 `StaticPool`，不适合作为真实并发 DB 压力测试环境；并行 `Send` 语义通过 router / node 单元测试验证。
+- Agent API 测试继续覆盖 graph enabled / disabled、身份失败、患者数据、图片分析、医学知识、风险提示等业务闭环。

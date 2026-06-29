@@ -64,3 +64,27 @@ npm run build
 
 - 进入 Phase 4：接入 Evidence / Safety 节点。
 - 后续可将 Dispatcher 从串行 ready task 调度切换为 `Send` 并行派发。
+## Phase 3.1 Verification
+
+Commands run:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest tests.test_langgraph_agent tests.test_agent_api.AgentApiTest.test_agent_graph_mode_runs_task_board_patient_data_worker tests.test_agent_api.AgentApiTest.test_agent_graph_image_worker_uses_uploaded_image_tool tests.test_agent_api.AgentApiTest.test_agent_graph_medical_knowledge_adds_source_summary -v
+.\.venv\Scripts\python.exe -m unittest tests.test_agent_api tests.test_medical_knowledge -v
+.\.venv\Scripts\python.exe -m unittest tests.test_langgraph_agent tests.test_agent_api tests.test_medical_knowledge -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+Results:
+
+- LangGraph task-board unit tests pass, including multi-ready-task dispatch, `max_parallel_tasks`, `Send` branch construction, and composer no-repeat-tool behavior.
+- Agent API tests pass for graph enabled / disabled, graph fallback, identity failure, patient data worker, image worker, medical knowledge worker, high-risk prompt, and legacy compatibility.
+- Medical knowledge tests pass without external network or real medical database.
+- Full backend test suite passes: 61 tests OK.
+
+Notes:
+
+- Phase 3.1 enables LangGraph `Send` parallel dispatch at graph level.
+- Worker outputs are now incremental patches; state reducers merge parallel `worker_events`, `evidence_items`, `tool_calls`, `agent_trace`, and `task_results`.
+- Composer no longer invokes the old tool-calling loop when worker output already exists, preventing duplicate image/tool execution.
+- SQLite in-memory test databases use `StaticPool` and are not treated as true concurrent DB stress-test infrastructure; parallel dispatch semantics are validated at router/node level, while API tests validate business closure per worker.

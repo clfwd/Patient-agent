@@ -1,6 +1,31 @@
 """State helpers for the patient agent graph."""
 
 from typing import Any, Dict, List, Optional, TypedDict
+from typing_extensions import Annotated
+
+
+def merge_list(left, right):
+    left_items = list(left or [])
+    right_items = list(right or [])
+    if not right_items:
+        return left_items
+    if right_items[: len(left_items)] == left_items:
+        return right_items
+    return left_items + right_items
+
+
+def merge_unique_list(left, right):
+    result = []
+    for item in list(left or []) + list(right or []):
+        if item not in result:
+            result.append(item)
+    return result
+
+
+def merge_dict(left, right):
+    result = dict(left or {})
+    result.update(dict(right or {}))
+    return result
 
 
 class AgentStep(TypedDict, total=False):
@@ -63,13 +88,14 @@ class AgentState(TypedDict, total=False):
     metadata: Dict[str, Any]
     conversation_history: List[Dict[str, str]]
     message_recorder: Any
-    plan: List[str]
+    plan: Annotated[List[str], merge_unique_list]
     task_board: List[AgentTask]
     current_task: Optional[AgentTask]
-    task_results: Dict[str, Any]
-    worker_events: List[Dict[str, Any]]
-    proposed_tasks: List[AgentTask]
-    evidence_items: List[Dict[str, Any]]
+    dispatched_tasks: List[AgentTask]
+    task_results: Annotated[Dict[str, Any], merge_dict]
+    worker_events: Annotated[List[Dict[str, Any]], merge_list]
+    proposed_tasks: Annotated[List[AgentTask], merge_list]
+    evidence_items: Annotated[List[Dict[str, Any]], merge_list]
     risk_flags: List[str]
     join_summary: Dict[str, Any]
     need_more_tasks: bool
@@ -77,9 +103,10 @@ class AgentState(TypedDict, total=False):
     max_dispatch_rounds: int
     max_tasks: int
     max_new_tasks_per_round: int
+    max_parallel_tasks: int
     steps: List[AgentStep]
-    tool_calls: List[AgentToolCall]
-    agent_trace: List[AgentTraceEvent]
+    tool_calls: Annotated[List[AgentToolCall], merge_list]
+    agent_trace: Annotated[List[AgentTraceEvent], merge_list]
     identity_verification: Optional[Dict[str, Any]]
     verified_patient: Optional[Dict[str, Any]]
     allowed_patient_id: Optional[str]
@@ -96,4 +123,4 @@ class AgentState(TypedDict, total=False):
     final_answer: Optional[str]
     audio: Optional[Dict[str, Any]]
     attachments_result: List[Dict[str, Any]]
-    errors: List[str]
+    errors: Annotated[List[str], merge_list]

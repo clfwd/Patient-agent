@@ -49,17 +49,7 @@ def build_agent_graph(service):
     workflow.set_entry_point(GRAPH_PREFLIGHT)
     workflow.add_edge(GRAPH_PREFLIGHT, GRAPH_PLANNER)
     workflow.add_edge(GRAPH_PLANNER, GRAPH_DISPATCHER)
-    workflow.add_conditional_edges(
-        GRAPH_DISPATCHER,
-        route_after_dispatcher,
-        {
-            GRAPH_MEMORY: GRAPH_MEMORY,
-            GRAPH_PATIENT_DATA: GRAPH_PATIENT_DATA,
-            GRAPH_IMAGE_ANALYSIS: GRAPH_IMAGE_ANALYSIS,
-            GRAPH_MEDICAL_KNOWLEDGE_AGENT: GRAPH_MEDICAL_KNOWLEDGE_AGENT,
-            GRAPH_JOIN: GRAPH_JOIN,
-        },
-    )
+    workflow.add_conditional_edges(GRAPH_DISPATCHER, route_after_dispatcher)
     workflow.add_edge(GRAPH_MEMORY, GRAPH_JOIN)
     workflow.add_edge(GRAPH_PATIENT_DATA, GRAPH_JOIN)
     workflow.add_edge(GRAPH_IMAGE_ANALYSIS, GRAPH_JOIN)

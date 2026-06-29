@@ -1,5 +1,7 @@
 """Task-board planner and dispatcher helpers for the LangGraph agent."""
 
+from langgraph.types import Send
+
 from app.tool_routing import IMAGE_KEYWORDS, RECORD_KEYWORDS, VISIT_KEYWORDS
 
 from .state import (
@@ -219,18 +221,38 @@ def find_ready_tasks(state):
 
 
 def start_next_ready_task(state):
-    ready = find_ready_tasks(state)
-    if not ready:
+    selected, task_board = start_ready_tasks(state, max_parallel_tasks=1)
+    if not selected:
         return None, list(state.get("task_board") or [])
-    selected = ready[0]
+    return selected[0], task_board
+
+
+def start_ready_tasks(state, max_parallel_tasks=None):
+    ready = find_ready_tasks(state)
+    limit = max_parallel_tasks if max_parallel_tasks is not None else state.get("max_parallel_tasks")
+    try:
+        limit = int(limit or len(ready) or 1)
+    except (TypeError, ValueError):
+        limit = len(ready) or 1
+    limit = max(1, limit)
+    selected = ready[:limit]
+    if not selected:
+        return [], list(state.get("task_board") or [])
+
+    selected_ids = {task.get("task_id") for task in selected}
+    selected_by_id = {}
     updated = []
+    dispatch_round = state.get("dispatch_round") or 0
     for task in state.get("task_board") or []:
         item = dict(task)
-        if item.get("task_id") == selected.get("task_id"):
+        if item.get("task_id") in selected_ids:
             item["status"] = "running"
-            selected = item
+            item["dispatch_round"] = dispatch_round
+            selected_by_id[item.get("task_id")] = item
         updated.append(item)
-    return selected, updated
+
+    ordered_selected = [selected_by_id[task.get("task_id")] for task in selected if task.get("task_id") in selected_by_id]
+    return ordered_selected, updated
 
 
 def summarize_task_board(task_board):
@@ -246,8 +268,15 @@ def summarize_task_board(task_board):
 
 
 def route_after_dispatcher(state):
-    current_task = state.get("current_task") or {}
-    return current_task.get("agent") or GRAPH_JOIN
+    dispatched = state.get("dispatched_tasks") or []
+    if not dispatched:
+        return GRAPH_JOIN
+    sends = []
+    for task in dispatched:
+        branch_state = dict(state)
+        branch_state["current_task"] = task
+        sends.append(Send(task.get("agent"), branch_state))
+    return sends
 
 
 def route_after_gap_check(state):

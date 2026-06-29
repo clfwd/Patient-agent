@@ -100,3 +100,20 @@
 - [ ] 手动调用 `/api/v1/agent/invoke` 验证结合患者资料的问题。
 - [ ] 手动调用 `/api/v1/agent/stream` 验证 SSE 阶段事件。
 - [ ] 手动验证高风险症状触发安全降级。
+## Phase 3.1: LangGraph Send 并行调度
+
+- [x] LG-311 启用 `Send` 并行 worker 派发
+  - Files: `app/agent/graph/graph.py`, `app/agent/graph/router.py`
+  - Acceptance: `graph_dispatcher` 能将同一轮多个 ready task 派发到多个 worker 分支。
+- [x] LG-312 增加并行 state reducer
+  - Files: `app/agent/state.py`
+  - Acceptance: `worker_events`、`evidence_items`、`tool_calls`、`agent_trace`、`task_results` 等并行分支输出可以安全合并。
+- [x] LG-313 Worker 返回增量 patch
+  - Files: `app/agent/graph/nodes.py`
+  - Acceptance: worker 不再返回完整 state，避免并行分支覆盖未变更字段。
+- [x] LG-314 Composer 避免重复工具调用
+  - Files: `app/agent/graph/nodes.py`
+  - Acceptance: 已有 worker 结果时，composer 只消费现有结果，不再进入旧 tool-calling loop 重复调用图片等工具。
+- [x] LG-315 并行调度测试覆盖
+  - Files: `tests/test_langgraph_agent.py`, `tests/test_agent_api.py`
+  - Acceptance: 覆盖多 ready task 派发、`max_parallel_tasks`、`Send` 分支、composer 不重复工具调用，以及现有 Agent API 闭环。

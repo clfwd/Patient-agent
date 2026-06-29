@@ -7,4 +7,5 @@ python-multipart==0.0.9
 langchain==0.2.16
 langchain-openai==0.1.25
 langgraph==0.2.34
+typing-extensions>=4.8.0
 psycopg2-binary==2.9.12

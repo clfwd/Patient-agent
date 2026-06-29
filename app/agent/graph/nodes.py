@@ -3,7 +3,7 @@
 from app.agent.tools import AgentToolExecutor, AgentToolValidationError
 from app.tool_routing import build_heuristic_tool_selection
 
-from .router import build_risk_flags, build_task_board, find_ready_tasks, start_next_ready_task, summarize_task_board
+from .router import build_risk_flags, build_task_board, find_ready_tasks, start_ready_tasks, summarize_task_board
 from .state import (
     GRAPH_COMPOSER,
     GRAPH_DISPATCHER,
@@ -61,18 +61,17 @@ def _current_task(state, agent):
 def _worker_success(state, task, result, evidence_items=None, status="done"):
     task_id = task.get("task_id")
     return {
-        "task_results": dict(list((state.get("task_results") or {}).items()) + [(task_id, result)]),
-        "worker_events": list(state.get("worker_events") or [])
-        + [
+        "task_results": {task_id: result},
+        "worker_events": [
             {
                 "task_id": task_id,
                 "agent": task.get("agent"),
                 "status": status,
-                "dispatch_round": state.get("dispatch_round") or 0,
+                "dispatch_round": task.get("dispatch_round", state.get("dispatch_round") or 0),
                 "result_key": task.get("result_key"),
             }
         ],
-        "evidence_items": list(state.get("evidence_items") or []) + list(evidence_items or []),
+        "evidence_items": list(evidence_items or []),
     }
 
 
@@ -80,20 +79,47 @@ def _worker_failure(state, task, error):
     message = str(error)
     task_id = task.get("task_id")
     return {
-        "task_results": dict(list((state.get("task_results") or {}).items()) + [(task_id, {"error": message})]),
-        "worker_events": list(state.get("worker_events") or [])
-        + [
+        "task_results": {task_id: {"error": message}},
+        "worker_events": [
             {
                 "task_id": task_id,
                 "agent": task.get("agent"),
                 "status": "failed",
-                "dispatch_round": state.get("dispatch_round") or 0,
+                "dispatch_round": task.get("dispatch_round", state.get("dispatch_round") or 0),
                 "result_key": task.get("result_key"),
                 "error": message,
             }
         ],
-        "errors": list(state.get("errors") or []) + [message],
+        "errors": [message],
     }
+
+
+def _worker_patch(current_state, original_state, before_trace_len, before_tool_call_len, extra=None):
+    patch = dict(extra or {})
+    trace_delta = list(current_state.get("agent_trace") or [])[before_trace_len:]
+    tool_call_delta = list(current_state.get("tool_calls") or [])[before_tool_call_len:]
+    if trace_delta:
+        patch["agent_trace"] = trace_delta
+    if tool_call_delta:
+        patch["tool_calls"] = tool_call_delta
+    for key in (
+        "task_results",
+        "worker_events",
+        "evidence_items",
+        "errors",
+        "patient_profile",
+        "visit_search_result",
+        "record_search_result",
+        "image_analysis",
+        "knowledge_hits",
+        "knowledge_retrieval_mode",
+        "knowledge_sources_text",
+        "long_term_profile_memories",
+        "long_term_event_memories",
+    ):
+        if key in current_state and current_state.get(key) != original_state.get(key):
+            patch[key] = current_state.get(key)
+    return patch
 
 
 def _tool_context(state):
@@ -169,14 +195,18 @@ def graph_dispatcher_node(service, state):
         current_state,
         "graph",
         "started",
-        "Selecting the next ready task.",
+        "Selecting ready tasks for parallel dispatch.",
         stage=GRAPH_DISPATCHER,
     )
-    task, task_board = start_next_ready_task(current_state)
+    tasks, task_board = start_ready_tasks(current_state)
     current_state["task_board"] = task_board
-    current_state["current_task"] = task
+    current_state["current_task"] = None
+    current_state["dispatched_tasks"] = tasks
     current_state["plan"] = _append_unique(current_state.get("plan") or [], GRAPH_DISPATCHER)
-    detail = "No ready task found." if task is None else "Dispatching task {0}.".format(task.get("task_id"))
+    if tasks:
+        detail = "Dispatching {0} ready task(s).".format(len(tasks))
+    else:
+        detail = "No ready task found."
     current_state["agent_trace"] = service._append_trace(
         current_state,
         "graph",
@@ -189,6 +219,8 @@ def graph_dispatcher_node(service, state):
 
 def graph_patient_data_agent_node(service, state):
     current_state = dict(state)
+    before_trace_len = len(current_state.get("agent_trace") or [])
+    before_tool_call_len = len(current_state.get("tool_calls") or [])
     task = _current_task(current_state, GRAPH_PATIENT_DATA)
     current_state["agent_trace"] = service._append_trace(
         current_state,
@@ -227,6 +259,7 @@ def graph_patient_data_agent_node(service, state):
             "Patient data worker completed.",
             stage=GRAPH_PATIENT_DATA,
         )
+        return _worker_patch(current_state, state, before_trace_len, before_tool_call_len)
     except (AgentToolValidationError, Exception) as exc:
         current_state.update(_worker_failure(current_state, task, exc))
         current_state["agent_trace"] = service._append_trace(
@@ -237,11 +270,13 @@ def graph_patient_data_agent_node(service, state):
             stage=GRAPH_PATIENT_DATA,
             error=str(exc),
         )
-    return current_state
+        return _worker_patch(current_state, state, before_trace_len, before_tool_call_len)
 
 
 def graph_image_analysis_agent_node(service, state):
     current_state = dict(state)
+    before_trace_len = len(current_state.get("agent_trace") or [])
+    before_tool_call_len = len(current_state.get("tool_calls") or [])
     task = _current_task(current_state, GRAPH_IMAGE_ANALYSIS)
     current_state["agent_trace"] = service._append_trace(
         current_state,
@@ -279,6 +314,7 @@ def graph_image_analysis_agent_node(service, state):
             "Image analysis worker completed.",
             stage=GRAPH_IMAGE_ANALYSIS,
         )
+        return _worker_patch(current_state, state, before_trace_len, before_tool_call_len)
     except (AgentToolValidationError, Exception) as exc:
         current_state.update(_worker_failure(current_state, task, exc))
         current_state["agent_trace"] = service._append_trace(
@@ -289,11 +325,13 @@ def graph_image_analysis_agent_node(service, state):
             stage=GRAPH_IMAGE_ANALYSIS,
             error=str(exc),
         )
-    return current_state
+        return _worker_patch(current_state, state, before_trace_len, before_tool_call_len)
 
 
 def graph_medical_knowledge_agent_node(service, state):
     current_state = dict(state)
+    before_trace_len = len(current_state.get("agent_trace") or [])
+    before_tool_call_len = len(current_state.get("tool_calls") or [])
     task = _current_task(current_state, GRAPH_MEDICAL_KNOWLEDGE_AGENT)
     current_state["agent_trace"] = service._append_trace(
         current_state,
@@ -334,7 +372,7 @@ def graph_medical_knowledge_agent_node(service, state):
         "Medical knowledge worker returned {0} result(s).".format(len(hits)),
         stage=GRAPH_MEDICAL_KNOWLEDGE_AGENT,
     )
-    return current_state
+    return _worker_patch(current_state, state, before_trace_len, before_tool_call_len)
 
 
 def graph_medical_knowledge_node(service, state):
@@ -350,6 +388,8 @@ def graph_medical_knowledge_node(service, state):
 
 def graph_memory_agent_node(service, state):
     current_state = dict(state)
+    before_trace_len = len(current_state.get("agent_trace") or [])
+    before_tool_call_len = len(current_state.get("tool_calls") or [])
     task = _current_task(current_state, GRAPH_MEMORY)
     current_state["agent_trace"] = service._append_trace(
         current_state,
@@ -376,7 +416,7 @@ def graph_memory_agent_node(service, state):
                 stage=GRAPH_MEMORY,
                 error=str(exc),
             )
-            return current_state
+            return _worker_patch(current_state, state, before_trace_len, before_tool_call_len)
     current_state["long_term_profile_memories"] = recalled.get("profiles") or []
     current_state["long_term_event_memories"] = recalled.get("fused_hits") or []
     evidence_items = [
@@ -400,7 +440,7 @@ def graph_memory_agent_node(service, state):
         "Memory worker completed.",
         stage=GRAPH_MEMORY,
     )
-    return current_state
+    return _worker_patch(current_state, state, before_trace_len, before_tool_call_len)
 
 
 def graph_join_node(service, state):
@@ -498,7 +538,12 @@ def graph_composer_node(service, state):
         "Entering LangGraph composer node.",
         stage=GRAPH_COMPOSER,
     )
-    current_state.update(service._tool_calling_node(current_state))
+    has_worker_output = bool(current_state.get("task_results") or current_state.get("evidence_items") or current_state.get("tool_calls"))
+    if has_worker_output:
+        current_state["final_answer"] = (current_state.get("final_answer") or "").strip() or service._build_fallback_answer(current_state)
+        current_state["tool_calling_mode"] = current_state.get("tool_calling_mode") or "graph-workers"
+    else:
+        current_state.update(service._tool_calling_node(current_state))
     sources_text = current_state.get("knowledge_sources_text") or _format_knowledge_sources(current_state.get("knowledge_hits") or [])
     current_state["knowledge_sources_text"] = sources_text or None
     final_answer = (current_state.get("final_answer") or "").strip()
