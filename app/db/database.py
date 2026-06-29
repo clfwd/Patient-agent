@@ -42,6 +42,7 @@ SessionLocal = build_session_factory(engine)
 def create_all_tables(engine_override=None):
     """初始化所有 ORM 表。"""
     from . import models  # noqa: F401
+    from app.knowledge import models as knowledge_models  # noqa: F401
 
     target_engine = engine_override or engine
     Base.metadata.create_all(bind=target_engine)

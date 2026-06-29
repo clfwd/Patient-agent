@@ -30,6 +30,8 @@
 | `AGENT_LLM_MODEL` | 常用 | Agent tool-calling 模型 |
 | `AGENT_LLM_API_KEY` | 常用 | Agent tool-calling API key |
 | `AGENT_LLM_BASE_URL` | 可选 | Agent tool-calling base URL |
+| `AGENT_GRAPH_ENABLED` | 可选 / 实验 | 是否启用后续 LangGraph 编排路径，默认 `false` |
+| `AGENT_GRAPH_REQUIRE_LANGGRAPH` | 可选 / 实验 | `AGENT_GRAPH_ENABLED=true` 时是否强制要求 `langgraph` 可导入，默认 `false` |
 | `QWEN_API_KEY` | 图像分析 / 语音常用 | Qwen / DashScope API key |
 | `QWEN_BASE_URL` | 可选 | 默认为 DashScope compatible-mode 地址 |
 | `QWEN_MODEL` | 可选 | MCP 路由或总结模型 |
@@ -84,6 +86,18 @@ echo $env:QWEN_API_KEY
 - `AGENT_LLM_BASE_URL`
 
 如果配置不完整，Agent 会回退到 `heuristic-fallback`。可以从响应里的 `used_models.tool_calling_mode` 判断当前是否真的走了 LangChain。
+
+### 5.3.1 LangGraph graph 模式没有启用
+
+Phase 0 仅接入 LangGraph 依赖和配置开关，默认仍走现有单 Agent 链路。优先检查：
+
+- `AGENT_GRAPH_ENABLED` 是否为 `true`
+- `AGENT_GRAPH_REQUIRE_LANGGRAPH` 是否为 `true`
+- 当前环境是否已安装 `langgraph`
+
+如果 `AGENT_GRAPH_ENABLED=true` 且 `AGENT_GRAPH_REQUIRE_LANGGRAPH=true`，但 `langgraph` 不可导入，Agent service 初始化会返回 `langgraph_dependency_missing`。如果 `AGENT_GRAPH_REQUIRE_LANGGRAPH=false`，后续 graph 路径应允许回退到旧链路。
+
+开启 LangGraph 编排后，`agent_trace.stage` 不再限定为 `preflight / tool_calling / postprocess`，还会出现 `graph_preflight / graph_router / graph_composer / graph_postprocess` 等节点名。
 
 ### 5.4 长期记忆服务不可用
 

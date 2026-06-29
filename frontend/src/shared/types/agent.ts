@@ -51,7 +51,7 @@ export type ChatMessage = {
 };
 
 export type AgentTrace = {
-  stage?: "preflight" | "tool_calling" | "postprocess";
+  stage?: string;
   event: string;
   status: "started" | "completed" | "failed" | string;
   detail: string;

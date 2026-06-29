@@ -1,0 +1,38 @@
+[
+  {
+    "title": "Blood Sugar Basics",
+    "source": "test-fixture:diabetes-education",
+    "source_type": "fixture",
+    "content": "Blood sugar refers to glucose in the blood. Persistently high blood sugar may require follow-up with a clinician.",
+    "chunks": [
+      {
+        "content": "Blood sugar refers to glucose in the blood and is commonly reviewed with fasting glucose or HbA1c results.",
+        "search_text": "blood sugar glucose HbA1c fasting glucose 血糖 指标 检查"
+      }
+    ]
+  },
+  {
+    "title": "Blood Pressure Basics",
+    "source": "test-fixture:hypertension-education",
+    "source_type": "fixture",
+    "content": "Blood pressure describes the force of blood against artery walls.",
+    "chunks": [
+      {
+        "content": "Blood pressure readings are usually written as systolic over diastolic pressure.",
+        "search_text": "blood pressure systolic diastolic 血压 指标 检查"
+      }
+    ]
+  },
+  {
+    "title": "Fever Home Care",
+    "source": "test-fixture:fever-care",
+    "source_type": "fixture",
+    "content": "Fever care often includes hydration and monitoring for warning signs.",
+    "chunks": [
+      {
+        "content": "Fever care includes hydration, rest, temperature monitoring, and seeking care for severe or persistent symptoms.",
+        "search_text": "fever temperature hydration 发热 护理"
+      }
+    ]
+  }
+]

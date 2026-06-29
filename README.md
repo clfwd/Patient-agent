@@ -25,6 +25,17 @@
 - PostgreSQL：长期记忆库
 - LangChain
 
+前端工作台：
+
+- React 18
+- TypeScript 5
+- Vite 5
+- Tailwind CSS 3
+- `react-router-dom`
+- `lucide-react`
+- 仓库已包含 `components.json` 与 `shadcn/ui` 兼容别名配置
+- 当前 `frontend/src/shared/ui` 里主要是仓库内自建轻量 UI primitives，尚未大规模引入官方 `shadcn/ui` 生成组件
+
 ## 安装与启动
 
 安装依赖：
@@ -39,11 +50,20 @@
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
 
+启动前端：
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
 常用地址：
 
 - Swagger: `http://127.0.0.1:8000/docs`
 - ReDoc: `http://127.0.0.1:8000/redoc`
 - 健康检查: `http://127.0.0.1:8000/health`
+- 前端工作台: `http://127.0.0.1:5173`
 
 ## 核心接口
 
@@ -130,6 +150,48 @@ Agent：
 
 语音不是模型工具循环的一部分，而是系统后处理能力。
 
+## 前端工作台
+
+当前仓库已包含一个面向患者端的聊天工作台前端工程，目录位于 `frontend/`。
+
+当前已实现：
+
+- 三栏工作台布局
+  - 左侧会话侧栏
+  - 中间对话主区
+  - 右侧患者摘要 / 会话状态 / Agent 轨迹
+- 基于 `session_id` 的多轮会话切换
+- 优先使用 `POST /api/v1/agent/stream`，失败时回退到 `POST /api/v1/agent/invoke`
+- 图片附件上传、预览与会话内继续追问
+- 独立身份核验输入区
+- 会话级音频回复展示与下载
+- 长文本阅读与基础响应式布局
+
+当前前端关键目录：
+
+- `frontend/src/app`
+  - 路由与工作台页面入口
+- `frontend/src/features/chat`
+  - 对话区、输入区、消息流、工作台状态 hook
+- `frontend/src/features/session`
+  - 会话侧栏
+- `frontend/src/features/context`
+  - 右侧上下文栏
+- `frontend/src/features/agent`
+  - 执行状态展示
+- `frontend/src/shared/api`
+  - 前端 API 封装
+- `frontend/src/shared/types`
+  - 前端类型定义
+- `frontend/src/shared/ui`
+  - 轻量 UI primitives
+
+说明：
+
+- 当前前端工程使用 Vite 管理构建，不是 Next.js。
+- 当前已完成 `shadcn/ui` 兼容配置初始化，但实际落地组件仍以仓库内自建 primitives 为主。
+- 当前流式回答仍是“阶段实时 + 最终答案切块推送”，还不是模型 token 级真流式。
+
 ## 会话与记忆
 
 ### 短期记忆
@@ -166,6 +228,8 @@ Agent：
 ```env
 AGENT_LLM_PROVIDER=qwen
 AGENT_LLM_MODEL=qwen-plus
+AGENT_GRAPH_ENABLED=false
+AGENT_GRAPH_REQUIRE_LANGGRAPH=false
 QWEN_API_KEY=your_qwen_api_key
 QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 QWEN_MODEL=qwen-plus
@@ -188,6 +252,12 @@ MEMORY_RETRIEVAL_DENSE_TOPN=10
 MEMORY_RETRIEVAL_KEYWORD_TOPN=10
 MEMORY_RRF_K=60
 ```
+
+Agent graph 相关变量：
+
+- `AGENT_GRAPH_ENABLED`：是否启用后续 LangGraph 编排路径，默认 `false`。当前 Phase 0 仅完成依赖和开关接入，默认仍走现有单 Agent 链路。
+- `AGENT_GRAPH_REQUIRE_LANGGRAPH`：当 `AGENT_GRAPH_ENABLED=true` 时，是否要求 `langgraph` 依赖必须可导入；默认 `false`，依赖缺失时后续 graph 路径应回退旧链路。
+- 开启 LangGraph 编排后，`agent_trace.stage` 会从原有三阶段扩展为 graph 节点名，例如 `graph_preflight`、`graph_router`、`graph_composer`、`graph_postprocess`。
 
 ## 当前边界
 
