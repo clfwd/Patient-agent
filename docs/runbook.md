@@ -101,6 +101,15 @@ Phase 0 仅接入 LangGraph 依赖和配置开关，默认仍走现有单 Agent 
 
 Phase 3.1 起，graph dispatcher 会通过 LangGraph `Send` 将同一轮 ready task 派发到多个 worker 分支。`max_parallel_tasks` 当前在 graph state 中默认是 `4`，用于限制单轮并行任务数。worker 只返回增量 `task_results`、`worker_events`、`evidence_items`、`tool_calls` 与 `agent_trace`，由 `graph_join` 统一更新 `task_board`。
 
+Phase 3.2 起，graph 路径使用 bounded Plan-Execute-Replan 语义：
+
+- `used_models.planner_mode` 和 `used_models.replanner_mode` 显示 `llm` 或 `rule_fallback`。
+- Planner 输出的 `allowed_tools` 只表示任务意图，实际工具集合由 capability registry 求交得到 `effective_allowed_tools`。
+- PatientDataAgent 默认最多 4 步，服务端上限 5 步，只能调用患者资料、就诊、病历工具。
+- MedicalKnowledgeAgent 默认和上限都是 2 步，只暴露 `medical_knowledge.search` 与 `medical_knowledge.deep_retrieve`。
+- `graph_gap_checker` 保持旧节点名兼容，但在 Phase 3.2 中承担 ReplannerAgent 语义，并写入 `finish_reason` 与 safety 字段。
+- Composer 不绑定业务工具；证据不足时只能基于 `finish_reason` 和 `answer_constraints` 降级回答，不能自行补查。
+
 如果在本地使用 SQLite 内存库运行测试，真实数据库读写不适合作为并行压力测试；项目测试以 router / node 单元测试验证 `Send` 分发和状态合并，API 测试继续覆盖各 worker 的业务闭环。生产或联调环境建议优先使用文件 SQLite 或 PostgreSQL 进行多 worker 综合请求验证。
 
 ### 5.4 长期记忆服务不可用

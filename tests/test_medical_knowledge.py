@@ -81,3 +81,15 @@ class MedicalKnowledgeTest(unittest.TestCase):
         self.assertGreaterEqual(len(results), 1)
         self.assertEqual(results[0]["title"], "Fever Home Care")
         self.assertIn("test-fixture", results[0]["source"])
+
+    def test_deep_retrieve_returns_compressed_sources_without_external_network(self):
+        self._seed_fixture()
+
+        result = self.service.deep_retrieve("blood pressure dizziness chest pain shortness of breath", limit=5)
+
+        self.assertIn("summary", result)
+        self.assertIn("key_points", result)
+        self.assertIn("sources", result)
+        self.assertIn("coverage", result)
+        self.assertIn("limitations", result)
+        self.assertEqual(result["retrieval_mode"], "deep_keyword_rrf")

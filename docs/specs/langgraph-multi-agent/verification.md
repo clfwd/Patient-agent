@@ -88,3 +88,25 @@ Notes:
 - Worker outputs are now incremental patches; state reducers merge parallel `worker_events`, `evidence_items`, `tool_calls`, `agent_trace`, and `task_results`.
 - Composer no longer invokes the old tool-calling loop when worker output already exists, preventing duplicate image/tool execution.
 - SQLite in-memory test databases use `StaticPool` and are not treated as true concurrent DB stress-test infrastructure; parallel dispatch semantics are validated at router/node level, while API tests validate business closure per worker.
+## Phase 3.2 Verification
+
+Commands run:
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile app\agent\graph\nodes.py app\agent\graph\react.py app\agent\graph\schemas.py app\agent\graph\capabilities.py app\knowledge\service.py app\knowledge\retrieval.py app\agent\state.py app\agent\service.py
+.\.venv\Scripts\python.exe -m unittest tests.test_langgraph_agent tests.test_medical_knowledge tests.test_agent_api -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+Results:
+
+- 35 focused tests pass for graph router/dispatcher, capability policy, Replanner force-finish safety, medical knowledge search/deep retrieve, and Agent API graph/legacy behavior.
+- Full backend suite passes: 65 tests OK.
+- Planner records `planner_mode` and falls back to rules on invalid or unavailable LLM output.
+- Replanner records `replanner_mode`, `finish_reason`, and safety fields.
+- PatientDataAgent can execute multi-tool patient evidence gathering under the server tool allowlist.
+- MedicalKnowledgeAgent exposes only `medical_knowledge.search` and `medical_knowledge.deep_retrieve`; deep retrieval keeps query rewrite, RRF, and compression internal.
+
+Remaining verification:
+
+- Manual live checks with a real LLM should verify JSON planner/replanner behavior and bounded ReAct traces.

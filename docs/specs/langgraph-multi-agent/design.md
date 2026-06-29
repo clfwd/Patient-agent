@@ -344,3 +344,47 @@ graph_preflight
 
 - SQLite 内存库使用 `StaticPool`，不适合作为真实并发 DB 压力测试环境；并行 `Send` 语义通过 router / node 单元测试验证。
 - Agent API 测试继续覆盖 graph enabled / disabled、身份失败、患者数据、图片分析、医学知识、风险提示等业务闭环。
+## Phase 3.2 Bounded Plan-Execute-Replan
+
+Phase 3.2 upgrades the task-board graph into a bounded Plan-Execute-Replan design with controlled ReAct workers:
+
+```text
+graph_preflight
+  -> PlannerAgent(graph_planner)
+  -> graph_dispatcher
+      -> PatientDataAgent / MedicalKnowledgeAgent / image worker / memory worker
+  -> graph_join
+  -> ReplannerAgent(graph_gap_checker)
+      -> graph_dispatcher or ComposerAgent(graph_composer)
+  -> graph_postprocess
+```
+
+Node roles are intentionally separated:
+
+- Workflow nodes: `graph_preflight`, `graph_dispatcher`, `graph_join`, `graph_postprocess`.
+- Reasoning agents: PlannerAgent, ReplannerAgent, ComposerAgent.
+- Controlled ReAct worker agents: PatientDataAgent and MedicalKnowledgeAgent.
+- Single-shot workers: image analysis and memory retrieval.
+
+PlannerAgent returns structured task intent only. It does not grant tool permission. Effective tools are computed server-side:
+
+```text
+effective_allowed_tools =
+  planner_allowed_tools
+  intersect capability_registry[agent].allowed_tools
+  intersect runtime_policy.allowed_tools
+```
+
+The same server-side policy caps tool steps:
+
+```text
+effective_max_tool_steps = min(task.max_tool_steps, agent_cap.max_tool_steps_cap)
+```
+
+PatientDataAgent is a bounded ReAct worker over patient data tools only: `patient.get_patient_profile`, `visit.search_visits`, and `medical_record.search_records`. It may perform multi-step evidence gathering, but it cannot diagnose, interpret images, call knowledge/memory tools, or choose arbitrary patient identifiers. Patient scope remains enforced by `AgentToolExecutor`.
+
+MedicalKnowledgeAgent is a bounded Agentic RAG worker with a deliberately small tool surface: `medical_knowledge.search` and `medical_knowledge.deep_retrieve`. `deep_retrieve` internally handles query rewrite, multi-query retrieval, RRF ranking, lightweight reranking, and evidence compression. These internal RAG steps are not exposed as separate LLM tools.
+
+ReplannerAgent is implemented on the existing `graph_gap_checker` node name for compatibility. It distinguishes `finish`, `continue`, and `force_finish`, where `force_finish` means Composer must produce a degraded answer because budget or recovery limits were reached.
+
+Evidence uses a normalized schema with `patient_specific` and `medical_knowledge` flags so Composer can distinguish patient facts, image findings, general medical knowledge, and historical memory. Safety signals include `safety_level`, `urgent_flags`, `answer_constraints`, and `forbidden_claims`. Phase 3.2 does not add a standalone SafetyAgent, but urgent patterns such as chest pain plus breathing difficulty constrain Composer output.

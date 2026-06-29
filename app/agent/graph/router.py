@@ -4,6 +4,7 @@ from langgraph.types import Send
 
 from app.tool_routing import IMAGE_KEYWORDS, RECORD_KEYWORDS, VISIT_KEYWORDS
 
+from .capabilities import apply_server_tool_policy, validate_task_board
 from .state import (
     GRAPH_COMPOSER,
     GRAPH_IMAGE_ANALYSIS,
@@ -92,8 +93,22 @@ def _contains_any(message, keywords):
     return any(keyword in message for keyword in keywords)
 
 
-def _make_task(task_id, agent, goal, result_key, priority, dedupe_key, reason, required=True, depends_on=None, parent_task_id=None):
-    return {
+def _make_task(
+    task_id,
+    agent,
+    goal,
+    result_key,
+    priority,
+    dedupe_key,
+    reason,
+    required=True,
+    depends_on=None,
+    parent_task_id=None,
+    allowed_tools=None,
+    expected_evidence=None,
+    max_tool_steps=None,
+):
+    task = {
         "task_id": task_id,
         "agent": agent,
         "goal": goal,
@@ -109,7 +124,12 @@ def _make_task(task_id, agent, goal, result_key, priority, dedupe_key, reason, r
         "max_retries": 1,
         "timeout_seconds": 20,
         "reason": reason,
+        "allowed_tools": list(allowed_tools or []),
+        "expected_evidence": list(expected_evidence or []),
     }
+    if max_tool_steps is not None:
+        task["max_tool_steps"] = max_tool_steps
+    return apply_server_tool_policy(task) or task
 
 
 def _dedupe_tasks(tasks):
@@ -157,6 +177,9 @@ def build_task_board(state, memory_enabled=False):
                 "memory:patient_context",
                 "Long-term memory is enabled for the verified patient.",
                 required=False,
+                allowed_tools=["memory.recall_long_term_memories"],
+                expected_evidence=["Relevant long-term memory for the current patient."],
+                max_tool_steps=1,
             )
         )
     if should_route_patient_data(state):
@@ -169,6 +192,13 @@ def build_task_board(state, memory_enabled=False):
                 90,
                 "patient_data:structured_context",
                 "The request references patient-specific structured data.",
+                allowed_tools=[
+                    "patient.get_patient_profile",
+                    "visit.search_visits",
+                    "medical_record.search_records",
+                ],
+                expected_evidence=["Verified patient profile, visit, or medical record facts."],
+                max_tool_steps=4,
             )
         )
     if should_route_image_analysis(state):
@@ -181,6 +211,9 @@ def build_task_board(state, memory_enabled=False):
                 85,
                 "image_analysis:uploaded_image",
                 "The request references an uploaded image.",
+                allowed_tools=["image.analyze_uploaded_image"],
+                expected_evidence=["Visible findings and limitations from the uploaded image."],
+                max_tool_steps=1,
             )
         )
     if should_search_medical_knowledge(state):
@@ -194,9 +227,15 @@ def build_task_board(state, memory_enabled=False):
                 "medical_knowledge:query",
                 "The request asks for general medical knowledge or test indicator explanation.",
                 required=False,
+                allowed_tools=[
+                    "medical_knowledge.search",
+                    "medical_knowledge.deep_retrieve",
+                ],
+                expected_evidence=["General medical knowledge with local sources."],
+                max_tool_steps=2,
             )
         )
-    return _dedupe_tasks(tasks)
+    return validate_task_board(_dedupe_tasks(tasks), max_tasks=state.get("max_tasks") or 8)
 
 
 def completed_task_ids(state):

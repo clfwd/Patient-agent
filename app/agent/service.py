@@ -336,6 +336,7 @@ class PatientAgentService(object):
             with_audio=request.with_audio,
             metadata=request.metadata,
             conversation_history=[],
+            conversation_context_summary={},
             message_recorder=recorder,
             event_callback=event_callback,
             plan=["preflight", "tool_calling", "postprocess"],
@@ -347,6 +348,11 @@ class PatientAgentService(object):
             proposed_tasks=[],
             evidence_items=[],
             risk_flags=[],
+            safety_level="normal",
+            urgent_flags=[],
+            answer_constraints=[],
+            forbidden_claims=[],
+            finish_reason=None,
             join_summary={},
             need_more_tasks=False,
             dispatch_round=0,
@@ -360,6 +366,8 @@ class PatientAgentService(object):
             attachments_result=attachments,
             knowledge_hits=[],
             knowledge_sources_text=None,
+            planner_mode=None,
+            replanner_mode=None,
             errors=[],
         )
 
@@ -399,6 +407,8 @@ class PatientAgentService(object):
                 "speech": self.mcp_registry.tts_service.model if state.get("audio") else None,
                 "graph_mode": self.graph_runtime_status,
                 "knowledge_retrieval_mode": state.get("knowledge_retrieval_mode") or "disabled",
+                "planner_mode": state.get("planner_mode"),
+                "replanner_mode": state.get("replanner_mode"),
             },
         }
 

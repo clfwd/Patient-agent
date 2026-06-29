@@ -70,3 +70,15 @@ def rank_chunks(query, chunks, limit=3):
         ranked.append((score, chunk))
     ranked.sort(key=lambda item: (-item[0], item[1].chunk_index, item[1].id))
     return [chunk for _, chunk in ranked[:limit]]
+
+
+def rrf_rank_chunks(queries, chunks, limit=5, per_query_limit=20, k=60):
+    scores = {}
+    by_id = {}
+    for query in queries or []:
+        ranked = rank_chunks(query, chunks, limit=per_query_limit)
+        for rank, chunk in enumerate(ranked, start=1):
+            by_id[chunk.id] = chunk
+            scores[chunk.id] = scores.get(chunk.id, 0.0) + 1.0 / (k + rank)
+    ordered = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+    return [by_id[chunk_id] for chunk_id, _ in ordered[:limit]]

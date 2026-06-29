@@ -70,6 +70,11 @@ class AgentTask(TypedDict, total=False):
     max_retries: int
     timeout_seconds: int
     reason: str
+    allowed_tools: List[str]
+    expected_evidence: List[str]
+    max_tool_steps: int
+    effective_allowed_tools: List[str]
+    effective_max_tool_steps: int
 
 
 class AgentState(TypedDict, total=False):
@@ -87,6 +92,7 @@ class AgentState(TypedDict, total=False):
     with_audio: bool
     metadata: Dict[str, Any]
     conversation_history: List[Dict[str, str]]
+    conversation_context_summary: Optional[Dict[str, Any]]
     message_recorder: Any
     plan: Annotated[List[str], merge_unique_list]
     task_board: List[AgentTask]
@@ -97,6 +103,11 @@ class AgentState(TypedDict, total=False):
     proposed_tasks: Annotated[List[AgentTask], merge_list]
     evidence_items: Annotated[List[Dict[str, Any]], merge_list]
     risk_flags: List[str]
+    safety_level: Optional[str]
+    urgent_flags: List[str]
+    answer_constraints: List[str]
+    forbidden_claims: List[str]
+    finish_reason: Optional[str]
     join_summary: Dict[str, Any]
     need_more_tasks: bool
     dispatch_round: int
@@ -118,6 +129,8 @@ class AgentState(TypedDict, total=False):
     knowledge_hits: List[Dict[str, Any]]
     knowledge_retrieval_mode: Optional[str]
     knowledge_sources_text: Optional[str]
+    planner_mode: Optional[str]
+    replanner_mode: Optional[str]
     tool_calling_mode: Optional[str]
     run_id: Optional[str]
     final_answer: Optional[str]

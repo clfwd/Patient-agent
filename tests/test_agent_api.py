@@ -272,6 +272,38 @@ class AgentApiTest(unittest.TestCase):
         )
         self.assertEqual(body["audio"]["audio_format"], "mp3")
 
+    def test_agent_graph_patient_data_worker_calls_visit_and_record_for_complex_question(self):
+        self.app.state.agent_service.graph_enabled = True
+        self.app.state.agent_service.graph_runtime_status = "available"
+        registry = self.app.state.mcp_registry
+        call_counter = {}
+        original_invoke_tool = registry.invoke_tool
+
+        def counting_invoke(tool_name, arguments, runtime_context=None):
+            call_counter[tool_name] = call_counter.get(tool_name, 0) + 1
+            return original_invoke_tool(tool_name, arguments, runtime_context=runtime_context)
+
+        registry.invoke_tool = counting_invoke
+        self._set_fake_llm([])
+
+        response = self.client.post(
+            "/api/v1/agent/invoke",
+            json={
+                "message": "Summarize my latest visit and medical record.",
+                "verify_name": "Liu Yang",
+                "verify_phone": "13900000005",
+                "with_audio": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+
+        self.assertEqual(call_counter["visit.search_visits"], 1)
+        self.assertEqual(call_counter["medical_record.search_records"], 1)
+        tool_names = [item["tool_name"] for item in body["tool_calls"]]
+        self.assertIn("visit.search_visits", tool_names)
+        self.assertIn("medical_record.search_records", tool_names)
+
     def test_agent_graph_image_worker_uses_uploaded_image_tool(self):
         self.app.state.agent_service.graph_enabled = True
         self.app.state.agent_service.graph_runtime_status = "available"

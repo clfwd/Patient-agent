@@ -2,7 +2,8 @@ import unittest
 
 from langgraph.types import Send
 
-from app.agent.graph.nodes import graph_composer_node
+from app.agent.graph.capabilities import apply_server_tool_policy
+from app.agent.graph.nodes import graph_composer_node, graph_gap_checker_node
 from app.agent.graph.router import (
     build_risk_flags,
     build_task_board,
@@ -27,6 +28,10 @@ class FakeComposerService(object):
 
     def _tool_calling_node(self, state):
         raise AssertionError("Composer should not execute tool-calling when worker output exists.")
+
+
+class FakeGraphService(FakeComposerService):
+    llm = None
 
 
 class LangGraphTaskBoardTest(unittest.TestCase):
@@ -151,6 +156,43 @@ class LangGraphTaskBoardTest(unittest.TestCase):
 
     def test_risk_keywords_are_detected(self):
         self.assertIn("chest pain", build_risk_flags({"message": "I have chest pain and dizziness."}))
+
+    def test_capability_policy_intersects_allowed_tools_and_caps_steps(self):
+        task = {
+            "task_id": "patient_data:bad-tools",
+            "agent": GRAPH_PATIENT_DATA,
+            "goal": "Retrieve patient facts.",
+            "result_key": "patient_data_result",
+            "priority": 90,
+            "required": True,
+            "dedupe_key": "patient_data:bad-tools",
+            "allowed_tools": ["visit.search_visits", "medical_knowledge.search", "image.analyze_uploaded_image"],
+            "max_tool_steps": 20,
+        }
+
+        result = apply_server_tool_policy(task)
+
+        self.assertEqual(result["effective_allowed_tools"], ["visit.search_visits"])
+        self.assertEqual(result["effective_max_tool_steps"], 5)
+
+    def test_gap_checker_force_finishes_when_round_budget_is_exhausted(self):
+        state = {
+            "message": "I have chest pain and shortness of breath.",
+            "agent_trace": [],
+            "task_board": [],
+            "worker_events": [],
+            "risk_flags": ["chest pain", "shortness of breath"],
+            "dispatch_round": 2,
+            "max_dispatch_rounds": 2,
+            "max_tasks": 8,
+            "plan": [],
+        }
+
+        result = graph_gap_checker_node(FakeGraphService(), state)
+
+        self.assertFalse(result["need_more_tasks"])
+        self.assertEqual(result["finish_reason"], "max_rounds_reached")
+        self.assertEqual(result["safety_level"], "urgent")
 
 
 if __name__ == "__main__":

@@ -117,3 +117,23 @@
 - [x] LG-315 并行调度测试覆盖
   - Files: `tests/test_langgraph_agent.py`, `tests/test_agent_api.py`
   - Acceptance: 覆盖多 ready task 派发、`max_parallel_tasks`、`Send` 分支、composer 不重复工具调用，以及现有 Agent API 闭环。
+## Phase 3.2: Bounded Plan-Execute-Replan
+
+- [x] LG-321 Add capability registry and structured planning schemas
+  - Files: `app/agent/graph/capabilities.py`, `app/agent/graph/schemas.py`
+  - Acceptance: planner tasks include annotated fields, and effective tools/step budgets are computed by server policy.
+- [x] LG-322 Upgrade graph planner to LLM-first with rule fallback
+  - Files: `app/agent/graph/nodes.py`
+  - Acceptance: planner writes `planner_mode`, validates task boards, and falls back safely when LLM output is missing or invalid.
+- [x] LG-323 Implement controlled ReAct worker adapters
+  - Files: `app/agent/graph/react.py`, `app/agent/graph/nodes.py`
+  - Acceptance: PatientDataAgent and MedicalKnowledgeAgent can run bounded ReAct under effective allowed tools and capped steps.
+- [x] LG-324 Add medical knowledge deep retrieval
+  - Files: `app/knowledge/retrieval.py`, `app/knowledge/service.py`
+  - Acceptance: `deep_retrieve` returns compressed summary, key points, sources, coverage, limitations, and hits without external network.
+- [x] LG-325 Upgrade gap checker semantics to ReplannerAgent
+  - Files: `app/agent/graph/nodes.py`
+  - Acceptance: node records `replanner_mode`, `finish_reason`, `safety_level`, and supports `finish/continue/force_finish`.
+- [x] LG-326 Strengthen evidence and safety signals
+  - Files: `app/agent/state.py`, `app/agent/graph/schemas.py`, `app/agent/graph/nodes.py`
+  - Acceptance: worker evidence distinguishes patient-specific facts and medical knowledge; Composer consumes answer constraints without calling business tools.
