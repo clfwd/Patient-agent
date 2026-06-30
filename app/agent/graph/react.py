@@ -2,7 +2,7 @@
 
 import json
 
-from app.agent.tools import AgentToolExecutor, build_agent_tools
+from app.agent.tools import build_agent_tools
 
 try:
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -81,20 +81,62 @@ def summarize_react_result(messages):
     return {"final_text": final_text, "tool_calls": tool_calls, "tool_results": tool_results}
 
 
-def _invoke_bound_loop(llm, tools, messages, max_tool_steps):
+class ToolCallBudget(object):
+    def __init__(self, max_tool_steps):
+        try:
+            max_steps = int(max_tool_steps or 1)
+        except (TypeError, ValueError):
+            max_steps = 1
+        self.max_tool_steps = max(1, max_steps)
+        self.used_tool_steps = 0
+
+    def check(self, tool_name):
+        if self.used_tool_steps >= self.max_tool_steps:
+            raise ValueError(
+                "ReAct tool call limit exceeded for {0}: effective_max_tool_steps={1}".format(
+                    tool_name,
+                    self.max_tool_steps,
+                )
+            )
+        self.used_tool_steps += 1
+
+    def remaining(self):
+        return max(0, self.max_tool_steps - self.used_tool_steps)
+
+
+def wrap_tools_with_budget(tools, budget):
+    if StructuredTool is None:
+        return list(tools or [])
+    wrapped = []
+    for tool in tools or []:
+        args_schema = getattr(tool, "args_schema", None)
+
+        def invoke_tool(_tool=tool, **kwargs):
+            budget.check(_tool.name)
+            return _tool.invoke(kwargs)
+
+        wrapped.append(
+            StructuredTool.from_function(
+                func=invoke_tool,
+                name=tool.name,
+                description=getattr(tool, "description", "") or "",
+                args_schema=args_schema,
+            )
+        )
+    return wrapped
+
+
+def _invoke_bound_loop(llm, tools, messages, budget):
     bound = llm.bind_tools(tools)
     output_messages = list(messages)
     tool_by_name = {tool.name: tool for tool in tools}
-    tool_steps = 0
-    while tool_steps < max_tool_steps:
+    while budget.remaining() > 0:
         ai_message = bound.invoke(output_messages)
         output_messages.append(ai_message)
         calls = getattr(ai_message, "tool_calls", None) or []
         if not calls:
             return {"messages": output_messages}
         for call in calls:
-            if tool_steps >= max_tool_steps:
-                break
             name = call.get("name")
             tool = tool_by_name.get(name)
             if tool is None:
@@ -110,7 +152,6 @@ def _invoke_bound_loop(llm, tools, messages, max_tool_steps):
                 )
             else:
                 output_messages.append({"role": "tool", "content": _safe_json(result), "name": name})
-            tool_steps += 1
     return {"messages": output_messages}
 
 
@@ -118,12 +159,14 @@ def run_bounded_react(service, state, task, tools, system_prompt):
     if service.llm is None or not tools:
         return None
     max_steps = task.get("effective_max_tool_steps") or task.get("max_tool_steps") or 1
+    budget = ToolCallBudget(max_steps)
+    bounded_tools = wrap_tools_with_budget(tools, budget)
     messages = build_react_messages(state, task, system_prompt)
     if create_react_agent is not None and hasattr(service.llm, "invoke"):
-        graph = create_react_agent(service.llm, tools=tools, state_modifier=system_prompt)
+        graph = create_react_agent(service.llm, tools=bounded_tools, state_modifier=system_prompt)
         return graph.invoke({"messages": messages[1:]}, {"recursion_limit": max(3, int(max_steps) * 2 + 2)})
     if hasattr(service.llm, "bind_tools"):
-        return _invoke_bound_loop(service.llm, tools, messages, int(max_steps))
+        return _invoke_bound_loop(service.llm, bounded_tools, messages, budget)
     return None
 
 

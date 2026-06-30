@@ -110,3 +110,21 @@ Results:
 Remaining verification:
 
 - Manual live checks with a real LLM should verify JSON planner/replanner behavior and bounded ReAct traces.
+
+## Phase 3.2 Patch Verification
+
+Commands run:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest tests.test_langgraph_agent -v
+.\.venv\Scripts\python.exe -m unittest tests.test_langgraph_agent tests.test_agent_api tests.test_medical_knowledge -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+Results:
+
+- 18 LangGraph unit tests pass, including Replanner idle-loop protection and ReAct tool-call hard limits.
+- 42 focused graph / Agent API / medical knowledge tests pass.
+- Full backend suite passes: 72 tests OK.
+- Replanner now records `accepted_proposed_tasks` and forces `finish_reason=degraded_answer_allowed` when `continue` has no ready, accepted, or retryable work.
+- ReAct tools are wrapped with a shared `ToolCallBudget`, covering both `create_react_agent` injected tools and the compatibility `bind_tools` loop.

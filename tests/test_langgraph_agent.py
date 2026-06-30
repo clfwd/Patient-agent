@@ -1,9 +1,12 @@
+import json
 import unittest
 
 from langgraph.types import Send
 
+import app.agent.graph.react as react_module
 from app.agent.graph.capabilities import apply_server_tool_policy
 from app.agent.graph.nodes import graph_composer_node, graph_gap_checker_node
+from app.agent.graph.react import run_bounded_react, wrap_tools_with_budget, ToolCallBudget
 from app.agent.graph.router import (
     build_risk_flags,
     build_task_board,
@@ -13,6 +16,13 @@ from app.agent.graph.router import (
     start_ready_tasks,
 )
 from app.agent.graph.state import GRAPH_IMAGE_ANALYSIS, GRAPH_MEDICAL_KNOWLEDGE_AGENT, GRAPH_MEMORY, GRAPH_PATIENT_DATA
+
+try:
+    from langchain_core.messages import AIMessage
+    from langchain_core.tools import StructuredTool
+except ImportError:  # pragma: no cover
+    AIMessage = None
+    StructuredTool = None
 
 
 class FakeComposerService(object):
@@ -32,6 +42,65 @@ class FakeComposerService(object):
 
 class FakeGraphService(FakeComposerService):
     llm = None
+
+    def _stringify_content(self, content):
+        if isinstance(content, str):
+            return content
+        return str(content)
+
+
+class FakeLLMResponse(object):
+    def __init__(self, content):
+        self.content = content
+
+
+class FakeJsonLLM(object):
+    def __init__(self, payload):
+        self.payload = payload
+
+    def invoke(self, messages):
+        return FakeLLMResponse(json.dumps(self.payload))
+
+
+class FakeLLMGraphService(FakeGraphService):
+    def __init__(self, payload):
+        self.llm = FakeJsonLLM(payload)
+
+
+def _valid_patient_task(task_id="patient_data:1", status="pending", dedupe_key="patient_data:structured_context"):
+    return apply_server_tool_policy(
+        {
+            "task_id": task_id,
+            "agent": GRAPH_PATIENT_DATA,
+            "goal": "Retrieve patient data.",
+            "status": status,
+            "depends_on": [],
+            "result_key": "patient_data_result",
+            "priority": 90,
+            "required": True,
+            "dedupe_key": dedupe_key,
+            "created_by": "graph_planner",
+            "parent_task_id": None,
+            "retry_count": 0,
+            "max_retries": 1,
+            "timeout_seconds": 20,
+            "reason": "test",
+            "allowed_tools": ["patient.get_patient_profile"],
+            "expected_evidence": ["patient profile"],
+            "max_tool_steps": 2,
+        }
+    )
+
+
+def _continue_payload(proposed_tasks=None):
+    return {
+        "decision": "continue",
+        "finish_reason": "degraded_answer_allowed",
+        "missing_evidence": ["patient data"],
+        "proposed_tasks": proposed_tasks or [],
+        "stop_reason": "need more evidence",
+        "confidence": 0.5,
+    }
 
 
 class LangGraphTaskBoardTest(unittest.TestCase):
@@ -193,6 +262,201 @@ class LangGraphTaskBoardTest(unittest.TestCase):
         self.assertFalse(result["need_more_tasks"])
         self.assertEqual(result["finish_reason"], "max_rounds_reached")
         self.assertEqual(result["safety_level"], "urgent")
+
+    def test_gap_checker_force_finishes_continue_without_ready_or_proposed_tasks(self):
+        state = {
+            "message": "Check my patient data.",
+            "agent_trace": [],
+            "task_board": [],
+            "worker_events": [],
+            "dispatch_round": 0,
+            "max_dispatch_rounds": 2,
+            "max_tasks": 8,
+            "plan": [],
+        }
+
+        result = graph_gap_checker_node(FakeLLMGraphService(_continue_payload()), state)
+
+        self.assertFalse(result["need_more_tasks"])
+        self.assertEqual(result["finish_reason"], "degraded_answer_allowed")
+        self.assertEqual(result["accepted_proposed_tasks"], 0)
+        self.assertEqual(result["agent_trace"][-1]["force_finish_reason"], "continue_without_ready_or_accepted_tasks")
+
+    def test_gap_checker_force_finishes_when_proposed_tasks_are_deduped(self):
+        existing = _valid_patient_task(status="done")
+        proposed = dict(existing)
+        proposed["task_id"] = "patient_data:duplicate"
+        proposed["status"] = "pending"
+        proposed["created_by"] = "graph_gap_checker"
+        state = {
+            "message": "Check my patient data.",
+            "agent_trace": [],
+            "task_board": [existing],
+            "worker_events": [],
+            "dispatch_round": 0,
+            "max_dispatch_rounds": 2,
+            "max_tasks": 8,
+            "plan": [],
+        }
+
+        result = graph_gap_checker_node(FakeLLMGraphService(_continue_payload([proposed])), state)
+
+        self.assertFalse(result["need_more_tasks"])
+        self.assertEqual(result["finish_reason"], "degraded_answer_allowed")
+        self.assertEqual(result["accepted_proposed_tasks"], 0)
+        self.assertEqual(len(result["task_board"]), 1)
+
+    def test_gap_checker_allows_continue_when_ready_task_exists(self):
+        state = {
+            "message": "Check my patient data.",
+            "agent_trace": [],
+            "task_board": [_valid_patient_task()],
+            "worker_events": [],
+            "dispatch_round": 0,
+            "max_dispatch_rounds": 2,
+            "max_tasks": 8,
+            "plan": [],
+        }
+
+        result = graph_gap_checker_node(FakeLLMGraphService(_continue_payload()), state)
+
+        self.assertTrue(result["need_more_tasks"])
+        self.assertEqual(result["finish_reason"], "degraded_answer_allowed")
+
+    def test_gap_checker_allows_continue_when_required_task_can_retry(self):
+        failed_task = _valid_patient_task(status="failed")
+        state = {
+            "message": "Check my patient data.",
+            "agent_trace": [],
+            "task_board": [failed_task],
+            "join_summary": {"required_failed": True},
+            "worker_events": [],
+            "dispatch_round": 0,
+            "max_dispatch_rounds": 2,
+            "max_tasks": 8,
+            "plan": [],
+        }
+
+        result = graph_gap_checker_node(FakeLLMGraphService(_continue_payload()), state)
+
+        self.assertTrue(result["need_more_tasks"])
+        self.assertEqual(result["task_board"][0]["status"], "pending")
+        self.assertEqual(result["task_board"][0]["retry_count"], 1)
+
+    @unittest.skipIf(StructuredTool is None or AIMessage is None, "langchain-core is not installed")
+    def test_bound_react_loop_enforces_total_tool_call_limit(self):
+        calls = []
+
+        def fake_tool(value=None):
+            calls.append(value)
+            return {"ok": True, "value": value}
+
+        tool = StructuredTool.from_function(
+            func=fake_tool,
+            name="patient.get_patient_profile",
+            description="fake patient tool",
+        )
+
+        class FakeBoundLLM(object):
+            def invoke(self, messages):
+                return AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "patient.get_patient_profile", "args": {"value": "one"}, "id": "call-1"},
+                        {"name": "patient.get_patient_profile", "args": {"value": "two"}, "id": "call-2"},
+                        {"name": "patient.get_patient_profile", "args": {"value": "three"}, "id": "call-3"},
+                    ],
+                )
+
+        class FakeToolCallingLLM(object):
+            def bind_tools(self, tools):
+                return FakeBoundLLM()
+
+        class FakeReactService(object):
+            llm = FakeToolCallingLLM()
+
+        with self.assertRaises(ValueError):
+            run_bounded_react(
+                FakeReactService(),
+                {"message": "test"},
+                {"goal": "test", "effective_max_tool_steps": 2},
+                [tool],
+                "system",
+            )
+
+        self.assertEqual(calls, ["one", "two"])
+
+    @unittest.skipIf(StructuredTool is None, "langchain-core is not installed")
+    def test_tool_budget_wrapper_rejects_repeated_deep_retrieve_after_total_limit(self):
+        calls = []
+
+        def deep_retrieve(query):
+            calls.append(query)
+            return {"hits": []}
+
+        tool = StructuredTool.from_function(
+            func=deep_retrieve,
+            name="medical_knowledge.deep_retrieve",
+            description="fake deep retrieval",
+        )
+        budget = ToolCallBudget(1)
+        wrapped = wrap_tools_with_budget([tool], budget)[0]
+
+        wrapped.invoke({"query": "blood pressure"})
+        with self.assertRaises(ValueError):
+            wrapped.invoke({"query": "blood pressure again"})
+
+        self.assertEqual(calls, ["blood pressure"])
+
+    @unittest.skipIf(StructuredTool is None, "langchain-core is not installed")
+    def test_create_react_agent_branch_receives_budget_wrapped_tools(self):
+        calls = []
+
+        def fake_tool(value=None):
+            calls.append(value)
+            return {"ok": True}
+
+        tool = StructuredTool.from_function(
+            func=fake_tool,
+            name="patient.get_patient_profile",
+            description="fake patient tool",
+        )
+
+        class FakePrebuiltGraph(object):
+            def __init__(self, tools):
+                self.tools = tools
+
+            def invoke(self, state, config):
+                selected = self.tools[0]
+                selected.invoke({"value": "one"})
+                selected.invoke({"value": "two"})
+                return {"messages": []}
+
+        def fake_create_react_agent(llm, tools, state_modifier=None):
+            return FakePrebuiltGraph(tools)
+
+        class FakeInvokeLLM(object):
+            def invoke(self, messages):
+                return None
+
+        class FakeReactService(object):
+            llm = FakeInvokeLLM()
+
+        original_create_react_agent = react_module.create_react_agent
+        react_module.create_react_agent = fake_create_react_agent
+        try:
+            with self.assertRaises(ValueError):
+                run_bounded_react(
+                    FakeReactService(),
+                    {"message": "test"},
+                    {"goal": "test", "effective_max_tool_steps": 1},
+                    [tool],
+                    "system",
+                )
+        finally:
+            react_module.create_react_agent = original_create_react_agent
+
+        self.assertEqual(calls, ["one"])
 
 
 if __name__ == "__main__":

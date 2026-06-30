@@ -910,11 +910,15 @@ def graph_gap_checker_node(service, state):
         proposed = decision_payload.get("proposed_tasks") or []
 
     need_more = decision_payload.get("decision") == "continue"
+    accepted_proposed_tasks = 0
+    retried_required_tasks = 0
+    force_finish_reason = None
     if summary.get("required_failed"):
         for task in current_state.get("task_board") or []:
             if task.get("status") == "failed" and task.get("required") and (task.get("retry_count") or 0) < (task.get("max_retries") or 0):
                 task["status"] = "pending"
                 task["retry_count"] = (task.get("retry_count") or 0) + 1
+                retried_required_tasks += 1
                 need_more = True
     if need_more and proposed and current_state.get("dispatch_round", 0) < max_rounds and len(current_state.get("task_board") or []) < max_tasks:
         existing_keys = {task.get("dedupe_key") or task.get("task_id") for task in current_state.get("task_board") or []}
@@ -930,6 +934,7 @@ def graph_gap_checker_node(service, state):
             current_state["task_board"] = list(current_state.get("task_board") or []) + accepted
             current_state["proposed_tasks"] = list(current_state.get("proposed_tasks") or []) + accepted
             current_state["dispatch_round"] = (current_state.get("dispatch_round") or 0) + 1
+            accepted_proposed_tasks = len(accepted)
     if not need_more and current_state.get("dispatch_round", 0) < max_rounds and len(current_state.get("task_board") or []) < max_tasks:
         existing_keys = {task.get("dedupe_key") or task.get("task_id") for task in current_state.get("task_board") or []}
         rule_proposed = []
@@ -943,6 +948,7 @@ def graph_gap_checker_node(service, state):
             current_state["task_board"] = list(current_state.get("task_board") or []) + rule_proposed
             current_state["proposed_tasks"] = list(current_state.get("proposed_tasks") or []) + rule_proposed
             current_state["dispatch_round"] = (current_state.get("dispatch_round") or 0) + 1
+            accepted_proposed_tasks = len(rule_proposed)
             need_more = True
     if current_state.get("dispatch_round", 0) >= max_rounds and need_more:
         decision_payload["decision"] = "force_finish"
@@ -952,7 +958,13 @@ def graph_gap_checker_node(service, state):
         decision_payload["decision"] = "force_finish"
         decision_payload["finish_reason"] = "max_tasks_reached"
         need_more = False
+    if need_more and not find_ready_tasks(current_state) and accepted_proposed_tasks == 0 and retried_required_tasks == 0:
+        decision_payload["decision"] = "force_finish"
+        decision_payload["finish_reason"] = "degraded_answer_allowed"
+        need_more = False
+        force_finish_reason = "continue_without_ready_or_accepted_tasks"
     current_state["need_more_tasks"] = need_more
+    current_state["accepted_proposed_tasks"] = accepted_proposed_tasks
     current_state["replanner_mode"] = replanner_mode
     current_state["finish_reason"] = decision_payload.get("finish_reason")
     current_state["safety_level"] = decision_payload.get("safety_level") or current_state.get("safety_level") or "normal"
@@ -968,6 +980,8 @@ def graph_gap_checker_node(service, state):
         stage=GRAPH_GAP_CHECKER,
         replanner_mode=replanner_mode,
         finish_reason=current_state.get("finish_reason"),
+        accepted_proposed_tasks=accepted_proposed_tasks,
+        force_finish_reason=force_finish_reason,
         fallback_reason=fallback_reason,
     )
     return current_state
