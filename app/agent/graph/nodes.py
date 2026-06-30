@@ -5,7 +5,7 @@ import json
 from app.agent.tools import AgentToolExecutor, AgentToolValidationError
 from app.tool_routing import build_heuristic_tool_selection
 
-from .capabilities import apply_server_tool_policy, registry_for_prompt, validate_task_board
+from .capabilities import apply_server_tool_policy, registry_for_prompt, validate_proposed_tasks, validate_task_board
 from .react import build_knowledge_react_tools, build_patient_react_tools, run_bounded_react, summarize_react_result
 from .router import build_risk_flags, build_task_board, find_ready_tasks, start_ready_tasks, summarize_task_board
 from .schemas import PlannerOutput, ReplanDecision, WorkerEvidence
@@ -347,11 +347,12 @@ def _run_llm_replanner(service, state):
     text = _invoke_llm_text(service, _replanner_prompt(state))
     payload = _extract_json_object(text)
     decision = ReplanDecision.parse_obj(payload)
-    proposed = validate_task_board(
+    proposed, rejected = validate_proposed_tasks(
         [task.dict() for task in decision.proposed_tasks],
+        existing_tasks=state.get("task_board") or [],
         max_tasks=state.get("max_new_tasks_per_round") or 2,
     )
-    return decision, proposed
+    return decision, proposed, rejected
 
 
 def _rule_replan_decision(state):
@@ -900,8 +901,9 @@ def graph_gap_checker_node(service, state):
     fallback_reason = None
     decision_payload = None
     proposed = []
+    rejected_task_reasons = []
     try:
-        decision, proposed = _run_llm_replanner(service, current_state)
+        decision, proposed, rejected_task_reasons = _run_llm_replanner(service, current_state)
         decision_payload = decision.dict()
     except Exception as exc:
         replanner_mode = "rule_fallback"
@@ -965,6 +967,8 @@ def graph_gap_checker_node(service, state):
         force_finish_reason = "continue_without_ready_or_accepted_tasks"
     current_state["need_more_tasks"] = need_more
     current_state["accepted_proposed_tasks"] = accepted_proposed_tasks
+    current_state["rejected_proposed_tasks"] = len(rejected_task_reasons)
+    current_state["rejected_task_reasons"] = rejected_task_reasons
     current_state["replanner_mode"] = replanner_mode
     current_state["finish_reason"] = decision_payload.get("finish_reason")
     current_state["safety_level"] = decision_payload.get("safety_level") or current_state.get("safety_level") or "normal"
@@ -981,6 +985,8 @@ def graph_gap_checker_node(service, state):
         replanner_mode=replanner_mode,
         finish_reason=current_state.get("finish_reason"),
         accepted_proposed_tasks=accepted_proposed_tasks,
+        rejected_proposed_tasks=len(rejected_task_reasons),
+        rejected_task_reasons=rejected_task_reasons,
         force_finish_reason=force_finish_reason,
         fallback_reason=fallback_reason,
     )

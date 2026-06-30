@@ -128,3 +128,22 @@ Results:
 - Full backend suite passes: 72 tests OK.
 - Replanner now records `accepted_proposed_tasks` and forces `finish_reason=degraded_answer_allowed` when `continue` has no ready, accepted, or retryable work.
 - ReAct tools are wrapped with a shared `ToolCallBudget`, covering both `create_react_agent` injected tools and the compatibility `bind_tools` loop.
+
+## Phase 3.2 Task Validation Patch Verification
+
+Commands run:
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile app\agent\graph\capabilities.py app\agent\graph\nodes.py tests\test_langgraph_agent.py
+.\.venv\Scripts\python.exe -m unittest tests.test_langgraph_agent -v
+.\.venv\Scripts\python.exe -m unittest tests.test_langgraph_agent tests.test_agent_api tests.test_medical_knowledge -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+Results:
+
+- 26 LangGraph unit tests pass, including strict `depends_on`, task-id prefix, self-dependency, cycle, task-budget dependency, and Replanner proposed-task rejection cases.
+- 50 focused graph / Agent API / medical knowledge tests pass.
+- Full backend suite passes: 80 tests OK.
+- Planner invalid task boards now fail fast and use `planner_mode=rule_fallback`.
+- Replanner invalid proposed tasks are rejected individually and recorded via `rejected_proposed_tasks` / `rejected_task_reasons`.

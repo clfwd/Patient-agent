@@ -4,8 +4,13 @@ import unittest
 from langgraph.types import Send
 
 import app.agent.graph.react as react_module
-from app.agent.graph.capabilities import apply_server_tool_policy
-from app.agent.graph.nodes import graph_composer_node, graph_gap_checker_node
+from app.agent.graph.capabilities import (
+    TaskBoardValidationError,
+    apply_server_tool_policy,
+    validate_proposed_tasks,
+    validate_task_board,
+)
+from app.agent.graph.nodes import graph_composer_node, graph_gap_checker_node, graph_planner_node
 from app.agent.graph.react import run_bounded_react, wrap_tools_with_budget, ToolCallBudget
 from app.agent.graph.router import (
     build_risk_flags,
@@ -67,14 +72,14 @@ class FakeLLMGraphService(FakeGraphService):
         self.llm = FakeJsonLLM(payload)
 
 
-def _valid_patient_task(task_id="patient_data:1", status="pending", dedupe_key="patient_data:structured_context"):
+def _valid_patient_task(task_id="patient_data:1", status="pending", dedupe_key="patient_data:structured_context", depends_on=None):
     return apply_server_tool_policy(
         {
             "task_id": task_id,
             "agent": GRAPH_PATIENT_DATA,
             "goal": "Retrieve patient data.",
             "status": status,
-            "depends_on": [],
+            "depends_on": list(depends_on or []),
             "result_key": "patient_data_result",
             "priority": 90,
             "required": True,
@@ -88,6 +93,31 @@ def _valid_patient_task(task_id="patient_data:1", status="pending", dedupe_key="
             "allowed_tools": ["patient.get_patient_profile"],
             "expected_evidence": ["patient profile"],
             "max_tool_steps": 2,
+        }
+    )
+
+
+def _valid_knowledge_task(task_id="medical_knowledge:1", status="pending", dedupe_key="medical_knowledge:query", depends_on=None):
+    return apply_server_tool_policy(
+        {
+            "task_id": task_id,
+            "agent": GRAPH_MEDICAL_KNOWLEDGE_AGENT,
+            "goal": "Retrieve medical knowledge.",
+            "status": status,
+            "depends_on": list(depends_on or []),
+            "result_key": "medical_knowledge_result",
+            "priority": 80,
+            "required": False,
+            "dedupe_key": dedupe_key,
+            "created_by": "graph_planner",
+            "parent_task_id": None,
+            "retry_count": 0,
+            "max_retries": 1,
+            "timeout_seconds": 20,
+            "reason": "test",
+            "allowed_tools": ["medical_knowledge.search"],
+            "expected_evidence": ["medical knowledge"],
+            "max_tool_steps": 1,
         }
     )
 
@@ -244,6 +274,122 @@ class LangGraphTaskBoardTest(unittest.TestCase):
         self.assertEqual(result["effective_allowed_tools"], ["visit.search_visits"])
         self.assertEqual(result["effective_max_tool_steps"], 5)
 
+    def test_validate_task_board_rejects_invalid_dependency_instead_of_silent_drop(self):
+        patient_task = _valid_patient_task()
+        knowledge_task = _valid_knowledge_task(depends_on=["image:wrong_id"])
+
+        with self.assertRaises(TaskBoardValidationError) as caught:
+            validate_task_board([patient_task, knowledge_task])
+
+        self.assertEqual(caught.exception.rejected_tasks[0]["reason"], "invalid_dependency")
+
+    def test_validate_task_board_rejects_invalid_task_id_prefix(self):
+        task = _valid_patient_task(task_id="medical_knowledge:wrong_prefix")
+
+        with self.assertRaises(TaskBoardValidationError) as caught:
+            validate_task_board([task])
+
+        self.assertEqual(caught.exception.rejected_tasks[0]["reason"], "invalid_task_id_prefix")
+
+    def test_validate_task_board_rejects_self_dependency_and_cycle(self):
+        self_dependent = _valid_patient_task(depends_on=["patient_data:1"])
+        with self.assertRaises(TaskBoardValidationError) as caught:
+            validate_task_board([self_dependent])
+        self.assertEqual(caught.exception.rejected_tasks[0]["reason"], "self_dependency")
+
+        first = _valid_patient_task(task_id="patient_data:a", dedupe_key="patient_data:a", depends_on=["medical_knowledge:b"])
+        second = _valid_knowledge_task(task_id="medical_knowledge:b", dedupe_key="medical_knowledge:b", depends_on=["patient_data:a"])
+        with self.assertRaises(TaskBoardValidationError) as caught:
+            validate_task_board([first, second])
+        self.assertEqual(caught.exception.rejected_tasks[0]["reason"], "dependency_cycle")
+
+    def test_validate_proposed_tasks_rejects_bad_dependency_but_keeps_valid_tasks(self):
+        existing = [_valid_patient_task(status="done")]
+        bad = _valid_knowledge_task(
+            task_id="medical_knowledge:bad_dep",
+            dedupe_key="medical_knowledge:bad_dep",
+            depends_on=["image_analysis:missing"],
+        )
+        good = _valid_knowledge_task(
+            task_id="medical_knowledge:good_dep",
+            dedupe_key="medical_knowledge:good_dep",
+            depends_on=["patient_data:1"],
+        )
+
+        accepted, rejected = validate_proposed_tasks([bad, good], existing_tasks=existing, max_tasks=2)
+
+        self.assertEqual([task["task_id"] for task in accepted], ["medical_knowledge:good_dep"])
+        self.assertEqual(rejected[0]["reason"], "invalid_dependency")
+
+    def test_validate_proposed_tasks_allows_dependency_on_later_same_batch_task(self):
+        knowledge = _valid_knowledge_task(
+            task_id="medical_knowledge:after_patient",
+            dedupe_key="medical_knowledge:after_patient",
+            depends_on=["patient_data:new"],
+        )
+        patient = _valid_patient_task(task_id="patient_data:new", dedupe_key="patient_data:new")
+
+        accepted, rejected = validate_proposed_tasks([knowledge, patient], existing_tasks=[], max_tasks=2)
+
+        self.assertEqual(rejected, [])
+        self.assertEqual([task["task_id"] for task in accepted], ["medical_knowledge:after_patient", "patient_data:new"])
+        self.assertEqual(accepted[0]["depends_on"], ["patient_data:new"])
+
+    def test_validate_proposed_tasks_rejects_dependency_cut_by_task_budget(self):
+        knowledge = _valid_knowledge_task(
+            task_id="medical_knowledge:after_patient",
+            dedupe_key="medical_knowledge:after_patient",
+            depends_on=["patient_data:new"],
+        )
+        image = apply_server_tool_policy(
+            {
+                "task_id": "image_analysis:new",
+                "agent": GRAPH_IMAGE_ANALYSIS,
+                "goal": "Analyze image.",
+                "status": "pending",
+                "depends_on": [],
+                "result_key": "image_analysis_result",
+                "priority": 85,
+                "required": False,
+                "dedupe_key": "image_analysis:new",
+                "allowed_tools": ["image.analyze_uploaded_image"],
+                "max_tool_steps": 1,
+            }
+        )
+        patient = _valid_patient_task(task_id="patient_data:new", dedupe_key="patient_data:new")
+
+        accepted, rejected = validate_proposed_tasks([knowledge, image, patient], existing_tasks=[], max_tasks=2)
+
+        self.assertEqual([task["task_id"] for task in accepted], ["image_analysis:new"])
+        self.assertEqual(rejected[-1]["reason"], "dependency_not_accepted")
+
+    def test_planner_falls_back_when_llm_returns_invalid_dependency(self):
+        payload = {
+            "tasks": [
+                dict(
+                    _valid_knowledge_task(
+                        task_id="medical_knowledge:bad_dep",
+                        dedupe_key="medical_knowledge:bad_dep",
+                        depends_on=["image_analysis:missing"],
+                    )
+                )
+            ],
+            "risk_flags": [],
+            "conversation_context_summary": {},
+            "planning_notes": "bad dependency",
+        }
+        state = {
+            "message": "What is blood pressure?",
+            "agent_trace": [],
+            "plan": [],
+            "max_tasks": 8,
+        }
+
+        result = graph_planner_node(FakeLLMGraphService(payload), state)
+
+        self.assertEqual(result["planner_mode"], "rule_fallback")
+        self.assertIn("missing task_id", result["agent_trace"][-1]["fallback_reason"])
+
     def test_gap_checker_force_finishes_when_round_budget_is_exhausted(self):
         state = {
             "message": "I have chest pain and shortness of breath.",
@@ -305,6 +451,30 @@ class LangGraphTaskBoardTest(unittest.TestCase):
         self.assertEqual(result["finish_reason"], "degraded_answer_allowed")
         self.assertEqual(result["accepted_proposed_tasks"], 0)
         self.assertEqual(len(result["task_board"]), 1)
+
+    def test_gap_checker_rejects_invalid_proposed_dependency_without_global_fallback(self):
+        proposed = _valid_knowledge_task(
+            task_id="medical_knowledge:bad_dep",
+            dedupe_key="medical_knowledge:bad_dep",
+            depends_on=["image_analysis:missing"],
+        )
+        state = {
+            "message": "Check blood pressure.",
+            "agent_trace": [],
+            "task_board": [],
+            "worker_events": [],
+            "dispatch_round": 0,
+            "max_dispatch_rounds": 2,
+            "max_tasks": 8,
+            "plan": [],
+        }
+
+        result = graph_gap_checker_node(FakeLLMGraphService(_continue_payload([proposed])), state)
+
+        self.assertEqual(result["replanner_mode"], "llm")
+        self.assertEqual(result["rejected_proposed_tasks"], 1)
+        self.assertEqual(result["rejected_task_reasons"][0]["reason"], "invalid_dependency")
+        self.assertFalse(result["need_more_tasks"])
 
     def test_gap_checker_allows_continue_when_ready_task_exists(self):
         state = {

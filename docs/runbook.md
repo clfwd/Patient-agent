@@ -111,6 +111,8 @@ Phase 3.2 起，graph 路径使用 bounded Plan-Execute-Replan 语义：
 - Composer 不绑定业务工具；证据不足时只能基于 `finish_reason` 和 `answer_constraints` 降级回答，不能自行补查。
 - Replanner returning `continue` is treated as a suggestion. If no ready task, no accepted proposed task, and no retryable required task exist, the server forces `finish_reason=degraded_answer_allowed` to avoid dispatcher idle loops.
 - ReAct workers enforce `effective_max_tool_steps` at the injected-tool layer. This applies to both LangGraph `create_react_agent` and the compatibility `bind_tools` loop, so a single model turn cannot execute extra tool calls beyond the server cap.
+- Planner task boards now fail fast on invalid `depends_on`, invalid `task_id`, mismatched task-id prefix, duplicate ids, self-dependencies, or dependency cycles; this triggers `planner_mode=rule_fallback`.
+- Replanner proposed tasks use the same id/dependency checks, but invalid proposed tasks are rejected individually and surfaced through `rejected_proposed_tasks` and `rejected_task_reasons` in trace/state.
 
 如果在本地使用 SQLite 内存库运行测试，真实数据库读写不适合作为并行压力测试；项目测试以 router / node 单元测试验证 `Send` 分发和状态合并，API 测试继续覆盖各 worker 的业务闭环。生产或联调环境建议优先使用文件 SQLite 或 PostgreSQL 进行多 worker 综合请求验证。
 
