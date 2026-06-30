@@ -113,6 +113,31 @@ Phase 3.2 起，graph 路径使用 bounded Plan-Execute-Replan 语义：
 - ReAct workers enforce `effective_max_tool_steps` at the injected-tool layer. This applies to both LangGraph `create_react_agent` and the compatibility `bind_tools` loop, so a single model turn cannot execute extra tool calls beyond the server cap.
 - Planner task boards now fail fast on invalid `depends_on`, invalid `task_id`, mismatched task-id prefix, duplicate ids, self-dependencies, or dependency cycles; this triggers `planner_mode=rule_fallback`.
 - Replanner proposed tasks use the same id/dependency checks, but invalid proposed tasks are rejected individually and surfaced through `rejected_proposed_tasks` and `rejected_task_reasons` in trace/state.
+- Patch C 起，Planner / Replanner 不应输出内部 `task_id` 或 `depends_on`。它们只输出语义任务草稿，服务端根据 `agent + dedupe_key` 生成内部 `task_id`，并把 `depends_on_dedupe_keys` 解析为真实 `depends_on`。
+
+`dedupe_key` 不是自然语言摘要，而是稳定语义任务键。推荐格式：
+
+```text
+domain:purpose[:scope]
+```
+
+推荐示例：
+
+- `memory:patient_context`
+- `patient_data:latest_visit`
+- `patient_data:structured_context`
+- `image_analysis:uploaded_report`
+- `medical_knowledge:blood_pressure`
+- `safety:emergency_triage`
+
+不要这样写：
+
+- `patient_data:check_user_question_today_please`
+- `medical_knowledge:explain_the_report_and_dizziness`
+- `task_1`
+- `blood_pressure`
+
+如果 LLM 输出缺少领域前缀、像自然语言句子、重复、或引用不存在的 `depends_on_dedupe_keys`，Planner 会回退规则规划；Replanner 会拒绝对应 proposed task。
 
 如果在本地使用 SQLite 内存库运行测试，真实数据库读写不适合作为并行压力测试；项目测试以 router / node 单元测试验证 `Send` 分发和状态合并，API 测试继续覆盖各 worker 的业务闭环。生产或联调环境建议优先使用文件 SQLite 或 PostgreSQL 进行多 worker 综合请求验证。
 

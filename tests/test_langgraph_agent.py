@@ -7,6 +7,8 @@ import app.agent.graph.react as react_module
 from app.agent.graph.capabilities import (
     TaskBoardValidationError,
     apply_server_tool_policy,
+    normalize_planned_tasks,
+    normalize_proposed_tasks,
     validate_proposed_tasks,
     validate_task_board,
 )
@@ -130,6 +132,40 @@ def _continue_payload(proposed_tasks=None):
         "proposed_tasks": proposed_tasks or [],
         "stop_reason": "need more evidence",
         "confidence": 0.5,
+    }
+
+
+def _semantic_patient_task(dedupe_key="patient_data:structured_context", depends_on_dedupe_keys=None):
+    return {
+        "agent": GRAPH_PATIENT_DATA,
+        "task_type": "patient_data_lookup",
+        "dedupe_key": dedupe_key,
+        "depends_on_dedupe_keys": list(depends_on_dedupe_keys or []),
+        "goal": "Retrieve patient data.",
+        "reason": "test",
+        "result_key": "patient_data_result",
+        "allowed_tools": ["patient.get_patient_profile"],
+        "expected_evidence": ["patient profile"],
+        "priority": 90,
+        "required": True,
+        "max_tool_steps": 2,
+    }
+
+
+def _semantic_knowledge_task(dedupe_key="medical_knowledge:query", depends_on_dedupe_keys=None):
+    return {
+        "agent": GRAPH_MEDICAL_KNOWLEDGE_AGENT,
+        "task_type": "medical_knowledge_lookup",
+        "dedupe_key": dedupe_key,
+        "depends_on_dedupe_keys": list(depends_on_dedupe_keys or []),
+        "goal": "Retrieve medical knowledge.",
+        "reason": "test",
+        "result_key": "medical_knowledge_result",
+        "allowed_tools": ["medical_knowledge.search"],
+        "expected_evidence": ["medical knowledge"],
+        "priority": 80,
+        "required": False,
+        "max_tool_steps": 1,
     }
 
 
@@ -274,6 +310,79 @@ class LangGraphTaskBoardTest(unittest.TestCase):
         self.assertEqual(result["effective_allowed_tools"], ["visit.search_visits"])
         self.assertEqual(result["effective_max_tool_steps"], 5)
 
+    def test_normalize_planned_tasks_generates_task_id_from_dedupe_key(self):
+        tasks = normalize_planned_tasks([_semantic_patient_task()], max_tasks=8)
+
+        self.assertEqual(len(tasks), 1)
+        self.assertTrue(tasks[0]["task_id"].startswith("patient_data:patient_data_structured_context:"))
+        self.assertTrue(tasks[0]["server_generated_task_id"])
+        self.assertEqual(tasks[0]["depends_on"], [])
+
+    def test_normalize_planned_tasks_resolves_dedupe_dependencies(self):
+        patient = _semantic_patient_task("patient_data:latest_visit")
+        knowledge = _semantic_knowledge_task(
+            "medical_knowledge:blood_pressure",
+            depends_on_dedupe_keys=["patient_data:latest_visit"],
+        )
+
+        tasks = normalize_planned_tasks([knowledge, patient], max_tasks=8)
+        by_dedupe = {task["dedupe_key"]: task for task in tasks}
+
+        self.assertEqual(
+            by_dedupe["medical_knowledge:blood_pressure"]["depends_on"],
+            [by_dedupe["patient_data:latest_visit"]["task_id"]],
+        )
+
+    def test_normalize_planned_tasks_rejects_bad_dedupe_key_examples(self):
+        bad = _semantic_knowledge_task("medical_knowledge:explain_the_report_and_dizziness")
+
+        with self.assertRaises(TaskBoardValidationError) as caught:
+            normalize_planned_tasks([bad], max_tasks=8)
+
+        self.assertEqual(caught.exception.rejected_tasks[0]["reason"], "invalid_dedupe_key")
+
+    def test_normalize_planned_tasks_rejects_legacy_depends_on(self):
+        task = _semantic_knowledge_task("medical_knowledge:blood_pressure")
+        task["depends_on"] = ["patient_data:1"]
+
+        with self.assertRaises(TaskBoardValidationError) as caught:
+            normalize_planned_tasks([task], max_tasks=8)
+
+        self.assertEqual(caught.exception.rejected_tasks[0]["reason"], "legacy_depends_on_not_allowed")
+
+    def test_normalize_proposed_tasks_resolves_existing_and_same_batch_dependencies(self):
+        existing = normalize_planned_tasks([_semantic_patient_task("patient_data:latest_visit")], max_tasks=8)
+        image = {
+            "agent": GRAPH_IMAGE_ANALYSIS,
+            "task_type": "image_analysis",
+            "dedupe_key": "image_analysis:uploaded_report",
+            "goal": "Analyze report.",
+            "allowed_tools": ["image.analyze_uploaded_image"],
+            "max_tool_steps": 1,
+        }
+        knowledge = _semantic_knowledge_task(
+            "medical_knowledge:blood_pressure",
+            depends_on_dedupe_keys=["patient_data:latest_visit", "image_analysis:uploaded_report"],
+        )
+
+        accepted, rejected = normalize_proposed_tasks([knowledge, image], existing_tasks=existing, max_tasks=2)
+        by_dedupe = {task["dedupe_key"]: task for task in accepted}
+
+        self.assertEqual(rejected, [])
+        self.assertEqual(len(by_dedupe["medical_knowledge:blood_pressure"]["depends_on"]), 2)
+
+    def test_normalize_proposed_tasks_rejects_dependency_cut_by_task_budget(self):
+        knowledge = _semantic_knowledge_task(
+            "medical_knowledge:blood_pressure",
+            depends_on_dedupe_keys=["patient_data:latest_visit"],
+        )
+        patient = _semantic_patient_task("patient_data:latest_visit")
+
+        accepted, rejected = normalize_proposed_tasks([knowledge, patient], existing_tasks=[], max_tasks=1)
+
+        self.assertEqual(accepted, [])
+        self.assertEqual(rejected[-1]["reason"], "dependency_not_accepted")
+
     def test_validate_task_board_rejects_invalid_dependency_instead_of_silent_drop(self):
         patient_task = _valid_patient_task()
         knowledge_task = _valid_knowledge_task(depends_on=["image:wrong_id"])
@@ -388,7 +497,7 @@ class LangGraphTaskBoardTest(unittest.TestCase):
         result = graph_planner_node(FakeLLMGraphService(payload), state)
 
         self.assertEqual(result["planner_mode"], "rule_fallback")
-        self.assertIn("missing task_id", result["agent_trace"][-1]["fallback_reason"])
+        self.assertIn("depends_on is an internal field", result["agent_trace"][-1]["fallback_reason"])
 
     def test_gap_checker_force_finishes_when_round_budget_is_exhausted(self):
         state = {
@@ -473,7 +582,7 @@ class LangGraphTaskBoardTest(unittest.TestCase):
 
         self.assertEqual(result["replanner_mode"], "llm")
         self.assertEqual(result["rejected_proposed_tasks"], 1)
-        self.assertEqual(result["rejected_task_reasons"][0]["reason"], "invalid_dependency")
+        self.assertEqual(result["rejected_task_reasons"][0]["reason"], "legacy_depends_on_not_allowed")
         self.assertFalse(result["need_more_tasks"])
 
     def test_gap_checker_allows_continue_when_ready_task_exists(self):

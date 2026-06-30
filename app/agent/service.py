@@ -346,6 +346,7 @@ class PatientAgentService(object):
             task_results={},
             worker_events=[],
             proposed_tasks=[],
+            suggested_followups=[],
             evidence_items=[],
             risk_flags=[],
             safety_level="normal",

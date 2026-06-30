@@ -5,7 +5,7 @@ import json
 from app.agent.tools import AgentToolExecutor, AgentToolValidationError
 from app.tool_routing import build_heuristic_tool_selection
 
-from .capabilities import apply_server_tool_policy, registry_for_prompt, validate_proposed_tasks, validate_task_board
+from .capabilities import apply_server_tool_policy, normalize_planned_tasks, normalize_proposed_tasks, registry_for_prompt
 from .react import build_knowledge_react_tools, build_patient_react_tools, run_bounded_react, summarize_react_result
 from .router import build_risk_flags, build_task_board, find_ready_tasks, start_ready_tasks, summarize_task_board
 from .schemas import PlannerOutput, ReplanDecision, WorkerEvidence
@@ -128,6 +128,7 @@ def _worker_patch(current_state, original_state, before_trace_len, before_tool_c
         "long_term_profile_memories",
         "long_term_event_memories",
         "conversation_context_summary",
+        "suggested_followups",
         "planner_mode",
         "replanner_mode",
         "finish_reason",
@@ -203,7 +204,10 @@ def _planner_prompt(state):
                 "You are PlannerAgent for a bounded medical assistant graph. "
                 "Return JSON only with keys: tasks, risk_flags, conversation_context_summary, planning_notes. "
                 "Tasks must use only agents/tools from the capability registry. "
-                "Do not create tool calls; only describe task intent."
+                "Do not create tool calls; only describe task intent. "
+                "Do not output task_id or depends_on; the server generates task_id. "
+                "Use depends_on_dedupe_keys for semantic dependencies. "
+                "dedupe_key must be a stable semantic key in domain:purpose[:scope] format, not a natural-language summary."
             ),
         },
         {
@@ -215,6 +219,23 @@ def _planner_prompt(state):
                     "verified_patient": state.get("verified_patient") or {},
                     "image_context": state.get("image_context") or {},
                     "capability_registry": registry_for_prompt(),
+                    "dedupe_key_rules": {
+                        "format": "domain:purpose[:scope]",
+                        "good_examples": [
+                            "memory:patient_context",
+                            "patient_data:latest_visit",
+                            "patient_data:structured_context",
+                            "image_analysis:uploaded_report",
+                            "medical_knowledge:blood_pressure",
+                            "safety:emergency_triage",
+                        ],
+                        "bad_examples": [
+                            "patient_data:check_user_question_today_please",
+                            "medical_knowledge:explain_the_report_and_dizziness",
+                            "task_1",
+                            "blood_pressure",
+                        ],
+                    },
                     "max_tasks": state.get("max_tasks") or 8,
                 }
             ),
@@ -226,7 +247,7 @@ def _run_llm_planner(service, state):
     text = _invoke_llm_text(service, _planner_prompt(state))
     payload = _extract_json_object(text)
     output = PlannerOutput.parse_obj(payload)
-    tasks = validate_task_board([task.dict() for task in output.tasks], max_tasks=state.get("max_tasks") or 8)
+    tasks = normalize_planned_tasks([task.dict() for task in output.tasks], max_tasks=state.get("max_tasks") or 8)
     if not tasks:
         raise ValueError("planner produced no valid tasks")
     return output, tasks
@@ -315,7 +336,9 @@ def _replanner_prompt(state):
                 "You are ReplannerAgent for a bounded medical assistant graph. "
                 "Return JSON only matching ReplanDecision. Decide finish, continue, or force_finish. "
                 "Only propose incremental tasks from the capability registry. "
-                "Set safety_level and answer_constraints for urgent medical risk."
+                "Set safety_level and answer_constraints for urgent medical risk. "
+                "Do not output task_id or depends_on; the server generates task_id. "
+                "Use depends_on_dedupe_keys to reference existing or proposed task dedupe_key values."
             ),
         },
         {
@@ -328,6 +351,7 @@ def _replanner_prompt(state):
                     "worker_events": state.get("worker_events") or [],
                     "task_results": state.get("task_results") or {},
                     "evidence_items": state.get("evidence_items") or [],
+                    "suggested_followups": state.get("suggested_followups") or [],
                     "risk_flags": state.get("risk_flags") or [],
                     "join_summary": state.get("join_summary") or {},
                     "budgets": {
@@ -337,6 +361,23 @@ def _replanner_prompt(state):
                         "max_new_tasks_per_round": state.get("max_new_tasks_per_round") or 2,
                     },
                     "capability_registry": registry_for_prompt(),
+                    "dedupe_key_rules": {
+                        "format": "domain:purpose[:scope]",
+                        "good_examples": [
+                            "memory:patient_context",
+                            "patient_data:latest_visit",
+                            "patient_data:structured_context",
+                            "image_analysis:uploaded_report",
+                            "medical_knowledge:blood_pressure",
+                            "safety:emergency_triage",
+                        ],
+                        "bad_examples": [
+                            "patient_data:check_user_question_today_please",
+                            "medical_knowledge:explain_the_report_and_dizziness",
+                            "task_1",
+                            "blood_pressure",
+                        ],
+                    },
                 }
             ),
         },
@@ -347,7 +388,7 @@ def _run_llm_replanner(service, state):
     text = _invoke_llm_text(service, _replanner_prompt(state))
     payload = _extract_json_object(text)
     decision = ReplanDecision.parse_obj(payload)
-    proposed, rejected = validate_proposed_tasks(
+    proposed, rejected = normalize_proposed_tasks(
         [task.dict() for task in decision.proposed_tasks],
         existing_tasks=state.get("task_board") or [],
         max_tasks=state.get("max_new_tasks_per_round") or 2,
@@ -460,6 +501,7 @@ def graph_planner_node(service, state):
     current_state["forbidden_claims"] = safety["forbidden_claims"]
     current_state["planner_mode"] = planner_mode
     current_state["plan"] = _append_unique(current_state.get("plan") or [], GRAPH_PLANNER)
+    generated_task_ids = [task.get("task_id") for task in task_board]
     current_state["agent_trace"] = service._append_trace(
         current_state,
         "graph",
@@ -467,6 +509,9 @@ def graph_planner_node(service, state):
         "PlannerAgent created {0} task(s) using {1}.".format(len(task_board), planner_mode),
         stage=GRAPH_PLANNER,
         planner_mode=planner_mode,
+        task_id_mode="server_generated",
+        dependency_resolution_mode="dedupe_key",
+        generated_task_ids=generated_task_ids,
         fallback_reason=fallback_reason,
     )
     return current_state
@@ -869,6 +914,7 @@ def graph_join_node(service, state):
     current_state["task_board"] = task_board
     current_state["join_summary"] = summarize_task_board(task_board)
     current_state["current_task"] = None
+    current_state["suggested_followups"] = list(current_state.get("suggested_followups") or [])
     for event in events:
         if event.get("agent"):
             current_state["plan"] = _append_unique(current_state.get("plan") or [], event["agent"])
@@ -902,6 +948,7 @@ def graph_gap_checker_node(service, state):
     decision_payload = None
     proposed = []
     rejected_task_reasons = []
+    generated_proposed_task_ids = []
     try:
         decision, proposed, rejected_task_reasons = _run_llm_replanner(service, current_state)
         decision_payload = decision.dict()
@@ -937,6 +984,7 @@ def graph_gap_checker_node(service, state):
             current_state["proposed_tasks"] = list(current_state.get("proposed_tasks") or []) + accepted
             current_state["dispatch_round"] = (current_state.get("dispatch_round") or 0) + 1
             accepted_proposed_tasks = len(accepted)
+            generated_proposed_task_ids = [task.get("task_id") for task in accepted]
     if not need_more and current_state.get("dispatch_round", 0) < max_rounds and len(current_state.get("task_board") or []) < max_tasks:
         existing_keys = {task.get("dedupe_key") or task.get("task_id") for task in current_state.get("task_board") or []}
         rule_proposed = []
@@ -951,6 +999,7 @@ def graph_gap_checker_node(service, state):
             current_state["proposed_tasks"] = list(current_state.get("proposed_tasks") or []) + rule_proposed
             current_state["dispatch_round"] = (current_state.get("dispatch_round") or 0) + 1
             accepted_proposed_tasks = len(rule_proposed)
+            generated_proposed_task_ids = [task.get("task_id") for task in rule_proposed]
             need_more = True
     if current_state.get("dispatch_round", 0) >= max_rounds and need_more:
         decision_payload["decision"] = "force_finish"
@@ -984,6 +1033,9 @@ def graph_gap_checker_node(service, state):
         stage=GRAPH_GAP_CHECKER,
         replanner_mode=replanner_mode,
         finish_reason=current_state.get("finish_reason"),
+        task_id_mode="server_generated",
+        dependency_resolution_mode="dedupe_key",
+        generated_task_ids=generated_proposed_task_ids,
         accepted_proposed_tasks=accepted_proposed_tasks,
         rejected_proposed_tasks=len(rejected_task_reasons),
         rejected_task_reasons=rejected_task_reasons,

@@ -101,6 +101,7 @@ class AgentState(TypedDict, total=False):
     task_results: Annotated[Dict[str, Any], merge_dict]
     worker_events: Annotated[List[Dict[str, Any]], merge_list]
     proposed_tasks: Annotated[List[AgentTask], merge_list]
+    suggested_followups: Annotated[List[Dict[str, Any]], merge_list]
     evidence_items: Annotated[List[Dict[str, Any]], merge_list]
     risk_flags: List[str]
     safety_level: Optional[str]

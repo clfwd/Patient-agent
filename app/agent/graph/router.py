@@ -4,7 +4,7 @@ from langgraph.types import Send
 
 from app.tool_routing import IMAGE_KEYWORDS, RECORD_KEYWORDS, VISIT_KEYWORDS
 
-from .capabilities import apply_server_tool_policy, validate_task_board
+from .capabilities import normalize_planned_tasks
 from .state import (
     GRAPH_COMPOSER,
     GRAPH_IMAGE_ANALYSIS,
@@ -94,42 +94,37 @@ def _contains_any(message, keywords):
 
 
 def _make_task(
-    task_id,
     agent,
+    task_type,
     goal,
     result_key,
     priority,
     dedupe_key,
     reason,
     required=True,
-    depends_on=None,
-    parent_task_id=None,
+    depends_on_dedupe_keys=None,
+    parent_dedupe_key=None,
     allowed_tools=None,
     expected_evidence=None,
     max_tool_steps=None,
 ):
     task = {
-        "task_id": task_id,
         "agent": agent,
+        "task_type": task_type,
         "goal": goal,
-        "status": "pending",
-        "depends_on": list(depends_on or []),
+        "depends_on_dedupe_keys": list(depends_on_dedupe_keys or []),
         "result_key": result_key,
         "priority": priority,
         "required": bool(required),
         "dedupe_key": dedupe_key,
-        "created_by": "graph_planner" if parent_task_id is None else "graph_gap_checker",
-        "parent_task_id": parent_task_id,
-        "retry_count": 0,
-        "max_retries": 1,
-        "timeout_seconds": 20,
+        "parent_dedupe_key": parent_dedupe_key,
         "reason": reason,
         "allowed_tools": list(allowed_tools or []),
         "expected_evidence": list(expected_evidence or []),
     }
     if max_tool_steps is not None:
         task["max_tool_steps"] = max_tool_steps
-    return apply_server_tool_policy(task) or task
+    return task
 
 
 def _dedupe_tasks(tasks):
@@ -169,8 +164,8 @@ def build_task_board(state, memory_enabled=False):
     if memory_enabled and state.get("patient_id"):
         tasks.append(
             _make_task(
-                "memory:1",
                 GRAPH_MEMORY,
+                "memory_retrieval",
                 "Recall relevant long-term patient memory.",
                 "memory_result",
                 95,
@@ -185,8 +180,8 @@ def build_task_board(state, memory_enabled=False):
     if should_route_patient_data(state):
         tasks.append(
             _make_task(
-                "patient_data:1",
                 GRAPH_PATIENT_DATA,
+                "patient_data_lookup",
                 "Retrieve patient profile, medical record, or visit data.",
                 "patient_data_result",
                 90,
@@ -204,8 +199,8 @@ def build_task_board(state, memory_enabled=False):
     if should_route_image_analysis(state):
         tasks.append(
             _make_task(
-                "image_analysis:1",
                 GRAPH_IMAGE_ANALYSIS,
+                "image_analysis",
                 "Analyze the uploaded image or report attachment.",
                 "image_analysis_result",
                 85,
@@ -219,8 +214,8 @@ def build_task_board(state, memory_enabled=False):
     if should_search_medical_knowledge(state):
         tasks.append(
             _make_task(
-                "medical_knowledge:1",
                 GRAPH_MEDICAL_KNOWLEDGE_AGENT,
+                "medical_knowledge_lookup",
                 "Retrieve relevant local medical knowledge.",
                 "medical_knowledge_result",
                 80,
@@ -235,7 +230,7 @@ def build_task_board(state, memory_enabled=False):
                 max_tool_steps=2,
             )
         )
-    return validate_task_board(_dedupe_tasks(tasks), max_tasks=state.get("max_tasks") or 8)
+    return normalize_planned_tasks(_dedupe_tasks(tasks), max_tasks=state.get("max_tasks") or 8)
 
 
 def completed_task_ids(state):

@@ -388,3 +388,30 @@ MedicalKnowledgeAgent is a bounded Agentic RAG worker with a deliberately small 
 ReplannerAgent is implemented on the existing `graph_gap_checker` node name for compatibility. It distinguishes `finish`, `continue`, and `force_finish`, where `force_finish` means Composer must produce a degraded answer because budget or recovery limits were reached.
 
 Evidence uses a normalized schema with `patient_specific` and `medical_knowledge` flags so Composer can distinguish patient facts, image findings, general medical knowledge, and historical memory. Safety signals include `safety_level`, `urgent_flags`, `answer_constraints`, and `forbidden_claims`. Phase 3.2 does not add a standalone SafetyAgent, but urgent patterns such as chest pain plus breathing difficulty constrain Composer output.
+
+### Phase 3.2 Patch C: Server-Owned Task Identity
+
+PlannerAgent and ReplannerAgent now output semantic task drafts instead of internal graph task records. They must not provide `task_id` or `depends_on`. The server normalizer owns both:
+
+- `task_id` is generated from `agent + dedupe_key + sequence`.
+- `depends_on_dedupe_keys` is resolved to internal `depends_on` after all accepted tasks are known.
+- invalid semantic dependencies fail the initial planner and reject replanner proposed tasks.
+- workers do not mutate `task_board`; if a worker notices follow-up work, it writes `suggested_followups` for ReplannerAgent to consider.
+
+`dedupe_key` is a stable semantic task key, not a natural-language summary. Use `domain:purpose[:scope]`.
+
+Good examples:
+
+- `memory:patient_context`
+- `patient_data:latest_visit`
+- `patient_data:structured_context`
+- `image_analysis:uploaded_report`
+- `medical_knowledge:blood_pressure`
+- `safety:emergency_triage`
+
+Bad examples:
+
+- `patient_data:check_user_question_today_please`
+- `medical_knowledge:explain_the_report_and_dizziness`
+- `task_1`
+- `blood_pressure`
