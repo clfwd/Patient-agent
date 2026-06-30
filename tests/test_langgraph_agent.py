@@ -74,6 +74,45 @@ class FakeLLMGraphService(FakeGraphService):
         self.llm = FakeJsonLLM(payload)
 
 
+class FakeStructuredRunnable(object):
+    def __init__(self, payload=None, error=None):
+        self.payload = payload
+        self.error = error
+
+    def invoke(self, messages):
+        if self.error:
+            raise self.error
+        return self.payload
+
+
+class FakeStructuredLLM(object):
+    def __init__(self, structured_payload=None, fallback_payload=None, structured_error=None):
+        self.structured_payload = structured_payload
+        self.fallback_payload = fallback_payload
+        self.structured_error = structured_error
+        self.structured_invocations = 0
+        self.json_invocations = 0
+        self.structured_schema = None
+
+    def with_structured_output(self, schema):
+        self.structured_schema = schema
+        self.structured_invocations += 1
+        return FakeStructuredRunnable(self.structured_payload, self.structured_error)
+
+    def invoke(self, messages):
+        self.json_invocations += 1
+        return FakeLLMResponse(json.dumps(self.fallback_payload))
+
+
+class FakeStructuredGraphService(FakeGraphService):
+    def __init__(self, structured_payload=None, fallback_payload=None, structured_error=None):
+        self.llm = FakeStructuredLLM(
+            structured_payload=structured_payload,
+            fallback_payload=fallback_payload,
+            structured_error=structured_error,
+        )
+
+
 def _valid_patient_task(task_id="patient_data:1", status="pending", dedupe_key="patient_data:structured_context", depends_on=None):
     return apply_server_tool_policy(
         {
@@ -499,6 +538,87 @@ class LangGraphTaskBoardTest(unittest.TestCase):
         self.assertEqual(result["planner_mode"], "rule_fallback")
         self.assertIn("depends_on is an internal field", result["agent_trace"][-1]["fallback_reason"])
 
+    def test_planner_prefers_structured_output_when_supported(self):
+        payload = {
+            "tasks": [_semantic_patient_task("patient_data:structured_context")],
+            "risk_flags": [],
+            "conversation_context_summary": {"active_topics": ["profile"]},
+            "planning_notes": "structured",
+        }
+        state = {
+            "message": "Check my patient profile.",
+            "agent_trace": [],
+            "plan": [],
+            "max_tasks": 8,
+        }
+        service = FakeStructuredGraphService(structured_payload=payload)
+
+        result = graph_planner_node(service, state)
+
+        self.assertEqual(result["planner_mode"], "llm")
+        self.assertEqual(result["planner_output_mode"], "structured")
+        self.assertEqual(service.llm.structured_invocations, 1)
+        self.assertEqual(service.llm.json_invocations, 0)
+        self.assertTrue(result["task_board"][0]["task_id"].startswith("patient_data:patient_data_structured_context:"))
+
+    def test_planner_structured_failure_falls_back_to_json_parse(self):
+        payload = {
+            "tasks": [_semantic_patient_task("patient_data:structured_context")],
+            "risk_flags": [],
+            "conversation_context_summary": {},
+            "planning_notes": "json fallback",
+        }
+        state = {
+            "message": "Check my patient profile.",
+            "agent_trace": [],
+            "plan": [],
+            "max_tasks": 8,
+        }
+        service = FakeStructuredGraphService(
+            structured_payload=None,
+            fallback_payload=payload,
+            structured_error=ValueError("structured unavailable"),
+        )
+
+        result = graph_planner_node(service, state)
+
+        self.assertEqual(result["planner_mode"], "llm")
+        self.assertEqual(result["planner_output_mode"], "json_parse_fallback")
+        self.assertEqual(service.llm.structured_invocations, 1)
+        self.assertEqual(service.llm.json_invocations, 1)
+        self.assertIn("structured unavailable", result["agent_trace"][-1]["planner_structured_error"])
+
+    def test_planner_structured_invalid_task_uses_rule_fallback_without_json_retry(self):
+        payload = {
+            "tasks": [_semantic_knowledge_task("medical_knowledge:explain_the_report_and_dizziness")],
+            "risk_flags": [],
+            "conversation_context_summary": {},
+            "planning_notes": "bad dedupe",
+        }
+        state = {
+            "message": "What is blood pressure?",
+            "agent_trace": [],
+            "plan": [],
+            "max_tasks": 8,
+        }
+        service = FakeStructuredGraphService(
+            structured_payload=payload,
+            fallback_payload={
+                "tasks": [_semantic_patient_task("patient_data:structured_context")],
+                "risk_flags": [],
+                "conversation_context_summary": {},
+                "planning_notes": "should not be used",
+            },
+        )
+
+        result = graph_planner_node(service, state)
+
+        self.assertEqual(result["planner_mode"], "rule_fallback")
+        self.assertEqual(result["planner_output_mode"], "rule_fallback")
+        self.assertEqual(service.llm.structured_invocations, 1)
+        self.assertEqual(service.llm.json_invocations, 0)
+        self.assertIn("dedupe_key segment looks like a natural-language summary", result["agent_trace"][-1]["fallback_reason"])
+
     def test_gap_checker_force_finishes_when_round_budget_is_exhausted(self):
         state = {
             "message": "I have chest pain and shortness of breath.",
@@ -584,6 +704,81 @@ class LangGraphTaskBoardTest(unittest.TestCase):
         self.assertEqual(result["rejected_proposed_tasks"], 1)
         self.assertEqual(result["rejected_task_reasons"][0]["reason"], "legacy_depends_on_not_allowed")
         self.assertFalse(result["need_more_tasks"])
+
+    def test_replanner_prefers_structured_output_when_supported(self):
+        state = {
+            "message": "Check my patient data.",
+            "agent_trace": [],
+            "task_board": [],
+            "worker_events": [],
+            "dispatch_round": 0,
+            "max_dispatch_rounds": 2,
+            "max_tasks": 8,
+            "max_new_tasks_per_round": 2,
+            "plan": [],
+        }
+        payload = _continue_payload([_semantic_patient_task("patient_data:structured_context")])
+        service = FakeStructuredGraphService(structured_payload=payload)
+
+        result = graph_gap_checker_node(service, state)
+
+        self.assertEqual(result["replanner_mode"], "llm")
+        self.assertEqual(result["replanner_output_mode"], "structured")
+        self.assertEqual(result["accepted_proposed_tasks"], 1)
+        self.assertEqual(service.llm.structured_invocations, 1)
+        self.assertEqual(service.llm.json_invocations, 0)
+
+    def test_replanner_structured_failure_falls_back_to_json_parse(self):
+        state = {
+            "message": "Check my patient data.",
+            "agent_trace": [],
+            "task_board": [],
+            "worker_events": [],
+            "dispatch_round": 0,
+            "max_dispatch_rounds": 2,
+            "max_tasks": 8,
+            "max_new_tasks_per_round": 2,
+            "plan": [],
+        }
+        payload = _continue_payload([_semantic_patient_task("patient_data:structured_context")])
+        service = FakeStructuredGraphService(
+            structured_payload=None,
+            fallback_payload=payload,
+            structured_error=ValueError("structured unavailable"),
+        )
+
+        result = graph_gap_checker_node(service, state)
+
+        self.assertEqual(result["replanner_mode"], "llm")
+        self.assertEqual(result["replanner_output_mode"], "json_parse_fallback")
+        self.assertEqual(result["accepted_proposed_tasks"], 1)
+        self.assertEqual(service.llm.structured_invocations, 1)
+        self.assertEqual(service.llm.json_invocations, 1)
+        self.assertIn("structured unavailable", result["agent_trace"][-1]["replanner_structured_error"])
+
+    def test_replanner_structured_invalid_proposed_task_is_rejected(self):
+        state = {
+            "message": "Check blood pressure.",
+            "agent_trace": [],
+            "task_board": [],
+            "worker_events": [],
+            "dispatch_round": 0,
+            "max_dispatch_rounds": 2,
+            "max_tasks": 8,
+            "max_new_tasks_per_round": 2,
+            "plan": [],
+        }
+        payload = _continue_payload([_semantic_knowledge_task("medical_knowledge:explain_the_report_and_dizziness")])
+        service = FakeStructuredGraphService(structured_payload=payload)
+
+        result = graph_gap_checker_node(service, state)
+
+        self.assertEqual(result["replanner_mode"], "llm")
+        self.assertEqual(result["replanner_output_mode"], "structured")
+        self.assertEqual(result["rejected_proposed_tasks"], 1)
+        self.assertEqual(result["rejected_task_reasons"][0]["reason"], "invalid_dedupe_key")
+        self.assertFalse(result["need_more_tasks"])
+        self.assertEqual(service.llm.json_invocations, 0)
 
     def test_gap_checker_allows_continue_when_ready_task_exists(self):
         state = {

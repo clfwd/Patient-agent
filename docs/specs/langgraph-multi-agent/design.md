@@ -415,3 +415,27 @@ Bad examples:
 - `medical_knowledge:explain_the_report_and_dizziness`
 - `task_1`
 - `blood_pressure`
+
+### Phase 3.2 Patch D: Structured Planner Output
+
+PlannerAgent and ReplannerAgent prefer LangChain structured output when the configured LLM supports it:
+
+```text
+llm.with_structured_output(PlannerOutput)
+llm.with_structured_output(ReplanDecision)
+```
+
+The current Qwen integration uses the OpenAI-compatible `ChatOpenAI` client, so the client capability is available even though the model provider is Qwen/DashScope. If structured output fails at runtime, the graph falls back to the existing JSON text path:
+
+```text
+structured output
+  -> json_parse_fallback
+  -> rule_fallback or proposed-task rejection
+```
+
+Structured output is only a format guard. Server-owned normalization remains mandatory:
+
+- Planner output still passes through `normalize_planned_tasks`.
+- Replanner output still passes through `normalize_proposed_tasks`.
+- capability registry still computes effective tools and max tool steps.
+- invalid semantic tasks cannot bypass fallback by using a different output mode.

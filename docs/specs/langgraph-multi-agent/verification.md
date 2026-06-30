@@ -166,3 +166,23 @@ Results:
 - Planner / Replanner now output semantic task drafts; internal `task_id` values are generated server-side from `agent + dedupe_key`.
 - `depends_on_dedupe_keys` is resolved by the server into internal `depends_on`; invalid semantic dependencies fail planner normalization or reject proposed replanner tasks.
 - `dedupe_key` is documented as a stable `domain:purpose[:scope]` key, with natural-language summaries rejected.
+
+## Phase 3.2 Patch D Verification
+
+Commands run:
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile app\agent\graph\nodes.py app\agent\state.py app\agent\service.py tests\test_langgraph_agent.py
+.\.venv\Scripts\python.exe -m unittest tests.test_langgraph_agent -v
+.\.venv\Scripts\python.exe -m unittest tests.test_langgraph_agent tests.test_agent_api tests.test_medical_knowledge -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+Results:
+
+- 38 LangGraph unit tests pass, including structured Planner/Replanner output, JSON parse fallback, invalid structured task fallback, and invalid structured proposed-task rejection.
+- 62 focused graph / Agent API / medical knowledge tests pass.
+- Full backend suite passes: 92 tests OK.
+- Planner / Replanner now prefer `with_structured_output` when available.
+- `planner_output_mode` and `replanner_output_mode` record `structured`, `json_parse_fallback`, or `rule_fallback`.
+- Qwen remains the model provider when configured through DashScope/OpenAI-compatible settings; `ChatOpenAI` is only the compatible LangChain client.

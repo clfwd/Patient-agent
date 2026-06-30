@@ -114,6 +114,8 @@ Phase 3.2 起，graph 路径使用 bounded Plan-Execute-Replan 语义：
 - Planner task boards now fail fast on invalid `depends_on`, invalid `task_id`, mismatched task-id prefix, duplicate ids, self-dependencies, or dependency cycles; this triggers `planner_mode=rule_fallback`.
 - Replanner proposed tasks use the same id/dependency checks, but invalid proposed tasks are rejected individually and surfaced through `rejected_proposed_tasks` and `rejected_task_reasons` in trace/state.
 - Patch C 起，Planner / Replanner 不应输出内部 `task_id` 或 `depends_on`。它们只输出语义任务草稿，服务端根据 `agent + dedupe_key` 生成内部 `task_id`，并把 `depends_on_dedupe_keys` 解析为真实 `depends_on`。
+- Patch D 起，Planner / Replanner 会优先调用 `llm.with_structured_output(PlannerOutput / ReplanDecision)`。当前 Qwen 是通过 OpenAI-compatible `ChatOpenAI` 客户端接入；客户端支持 structured output 时会记录 `planner_output_mode=structured` 或 `replanner_output_mode=structured`。如果 structured 调用不可用或失败，会自动回退到当前 JSON parse 路径，并记录 `json_parse_fallback`。
+- structured output 只约束模型输出格式，不替代服务端策略。`normalize_planned_tasks`、`normalize_proposed_tasks`、capability registry、工具白名单和步数上限仍是最终可信边界。
 
 `dedupe_key` 不是自然语言摘要，而是稳定语义任务键。推荐格式：
 

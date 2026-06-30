@@ -368,7 +368,9 @@ class PatientAgentService(object):
             knowledge_hits=[],
             knowledge_sources_text=None,
             planner_mode=None,
+            planner_output_mode=None,
             replanner_mode=None,
+            replanner_output_mode=None,
             errors=[],
         )
 
@@ -409,7 +411,9 @@ class PatientAgentService(object):
                 "graph_mode": self.graph_runtime_status,
                 "knowledge_retrieval_mode": state.get("knowledge_retrieval_mode") or "disabled",
                 "planner_mode": state.get("planner_mode"),
+                "planner_output_mode": state.get("planner_output_mode"),
                 "replanner_mode": state.get("replanner_mode"),
+                "replanner_output_mode": state.get("replanner_output_mode"),
             },
         }
 

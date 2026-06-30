@@ -184,6 +184,22 @@ def _invoke_llm_text(service, messages):
     return service._stringify_content(getattr(response, "content", response))
 
 
+def _coerce_structured_output(value, schema):
+    if isinstance(value, schema):
+        return value
+    if hasattr(value, "dict"):
+        value = value.dict()
+    return schema.parse_obj(value)
+
+
+def _invoke_structured_llm(service, schema, messages):
+    llm = getattr(service, "llm", None)
+    if llm is None or not hasattr(llm, "with_structured_output"):
+        raise ValueError("structured output is not supported")
+    runnable = llm.with_structured_output(schema)
+    return _coerce_structured_output(runnable.invoke(messages), schema)
+
+
 def _conversation_summary(state):
     history = state.get("conversation_history") or []
     active_topics = []
@@ -244,13 +260,21 @@ def _planner_prompt(state):
 
 
 def _run_llm_planner(service, state):
-    text = _invoke_llm_text(service, _planner_prompt(state))
-    payload = _extract_json_object(text)
-    output = PlannerOutput.parse_obj(payload)
+    messages = _planner_prompt(state)
+    structured_error = None
+    try:
+        output = _invoke_structured_llm(service, PlannerOutput, messages)
+        output_mode = "structured"
+    except Exception as exc:
+        structured_error = str(exc)
+        text = _invoke_llm_text(service, messages)
+        payload = _extract_json_object(text)
+        output = PlannerOutput.parse_obj(payload)
+        output_mode = "json_parse_fallback"
     tasks = normalize_planned_tasks([task.dict() for task in output.tasks], max_tasks=state.get("max_tasks") or 8)
     if not tasks:
         raise ValueError("planner produced no valid tasks")
-    return output, tasks
+    return output, tasks, output_mode, structured_error
 
 
 def _rule_planner_output(state, service):
@@ -385,15 +409,23 @@ def _replanner_prompt(state):
 
 
 def _run_llm_replanner(service, state):
-    text = _invoke_llm_text(service, _replanner_prompt(state))
-    payload = _extract_json_object(text)
-    decision = ReplanDecision.parse_obj(payload)
+    messages = _replanner_prompt(state)
+    structured_error = None
+    try:
+        decision = _invoke_structured_llm(service, ReplanDecision, messages)
+        output_mode = "structured"
+    except Exception as exc:
+        structured_error = str(exc)
+        text = _invoke_llm_text(service, messages)
+        payload = _extract_json_object(text)
+        decision = ReplanDecision.parse_obj(payload)
+        output_mode = "json_parse_fallback"
     proposed, rejected = normalize_proposed_tasks(
         [task.dict() for task in decision.proposed_tasks],
         existing_tasks=state.get("task_board") or [],
         max_tasks=state.get("max_new_tasks_per_round") or 2,
     )
-    return decision, proposed, rejected
+    return decision, proposed, rejected, output_mode, structured_error
 
 
 def _rule_replan_decision(state):
@@ -478,13 +510,16 @@ def graph_planner_node(service, state):
         stage=GRAPH_PLANNER,
     )
     planner_mode = "llm"
+    planner_output_mode = None
+    planner_structured_error = None
     fallback_reason = None
     try:
-        planner_output, task_board = _run_llm_planner(service, current_state)
+        planner_output, task_board, planner_output_mode, planner_structured_error = _run_llm_planner(service, current_state)
         risk_flags = list(planner_output.risk_flags or [])
         current_state["conversation_context_summary"] = planner_output.conversation_context_summary or _conversation_summary(current_state)
     except Exception as exc:
         planner_mode = "rule_fallback"
+        planner_output_mode = "rule_fallback"
         fallback_reason = str(exc)
         rule_output = _rule_planner_output(current_state, service)
         task_board = rule_output["task_board"]
@@ -500,6 +535,7 @@ def graph_planner_node(service, state):
     current_state["answer_constraints"] = safety["answer_constraints"]
     current_state["forbidden_claims"] = safety["forbidden_claims"]
     current_state["planner_mode"] = planner_mode
+    current_state["planner_output_mode"] = planner_output_mode
     current_state["plan"] = _append_unique(current_state.get("plan") or [], GRAPH_PLANNER)
     generated_task_ids = [task.get("task_id") for task in task_board]
     current_state["agent_trace"] = service._append_trace(
@@ -509,6 +545,8 @@ def graph_planner_node(service, state):
         "PlannerAgent created {0} task(s) using {1}.".format(len(task_board), planner_mode),
         stage=GRAPH_PLANNER,
         planner_mode=planner_mode,
+        planner_output_mode=planner_output_mode,
+        planner_structured_error=planner_structured_error,
         task_id_mode="server_generated",
         dependency_resolution_mode="dedupe_key",
         generated_task_ids=generated_task_ids,
@@ -944,16 +982,19 @@ def graph_gap_checker_node(service, state):
     max_new_tasks = current_state.get("max_new_tasks_per_round") or 2
     summary = current_state.get("join_summary") or summarize_task_board(current_state.get("task_board") or [])
     replanner_mode = "llm"
+    replanner_output_mode = None
+    replanner_structured_error = None
     fallback_reason = None
     decision_payload = None
     proposed = []
     rejected_task_reasons = []
     generated_proposed_task_ids = []
     try:
-        decision, proposed, rejected_task_reasons = _run_llm_replanner(service, current_state)
+        decision, proposed, rejected_task_reasons, replanner_output_mode, replanner_structured_error = _run_llm_replanner(service, current_state)
         decision_payload = decision.dict()
     except Exception as exc:
         replanner_mode = "rule_fallback"
+        replanner_output_mode = "rule_fallback"
         fallback_reason = str(exc)
         decision_payload = _rule_replan_decision(current_state)
         proposed = decision_payload.get("proposed_tasks") or []
@@ -1019,6 +1060,7 @@ def graph_gap_checker_node(service, state):
     current_state["rejected_proposed_tasks"] = len(rejected_task_reasons)
     current_state["rejected_task_reasons"] = rejected_task_reasons
     current_state["replanner_mode"] = replanner_mode
+    current_state["replanner_output_mode"] = replanner_output_mode
     current_state["finish_reason"] = decision_payload.get("finish_reason")
     current_state["safety_level"] = decision_payload.get("safety_level") or current_state.get("safety_level") or "normal"
     current_state["urgent_flags"] = decision_payload.get("urgent_flags") or current_state.get("urgent_flags") or []
@@ -1032,6 +1074,8 @@ def graph_gap_checker_node(service, state):
         "ReplannerAgent decision: {0}.".format(decision_payload.get("decision")),
         stage=GRAPH_GAP_CHECKER,
         replanner_mode=replanner_mode,
+        replanner_output_mode=replanner_output_mode,
+        replanner_structured_error=replanner_structured_error,
         finish_reason=current_state.get("finish_reason"),
         task_id_mode="server_generated",
         dependency_resolution_mode="dedupe_key",
