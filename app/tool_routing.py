@@ -4,10 +4,10 @@ import re
 from datetime import date
 
 
-RECENT_KEYWORDS = ("最近", "最新")
-VISIT_KEYWORDS = ("就诊", "复诊")
-RECORD_KEYWORDS = ("病历", "病例", "病史", "诊断")
-IMAGE_KEYWORDS = ("图片", "图像", "影像")
+RECENT_KEYWORDS = ("最近", "最新", "recent", "latest")
+VISIT_KEYWORDS = ("就诊", "复诊", "visit", "follow-up", "followup")
+RECORD_KEYWORDS = ("病历", "病例", "病史", "诊断", "record", "diagnosis", "medical history")
+IMAGE_KEYWORDS = ("图片", "图像", "影像", "image", "photo", "picture", "report", "scan", "x-ray")
 IDENTITY_KEYWORDS = ("身份", "验证", "核验", "本人")
 SPEECH_KEYWORDS = ("语音", "播报")
 

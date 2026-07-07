@@ -31,6 +31,7 @@ from app.db import (
     init_database,
 )
 from app.images import UploadedImageStorageService
+from app.knowledge import MedicalKnowledgeService
 from app.memory import LongTermMemoryService, MemoryExtractionWorker, QwenEmbeddingClient, init_memory_database
 from app.memory.extractor import LongTermMemoryExtractor
 from app.memory.schemas import (
@@ -186,11 +187,13 @@ def create_app(database_url=None, memory_database_url=None, start_memory_worker=
             rrf_k=_env_int("MEMORY_RRF_K", 60),
         )
     app.state.memory_service = memory_service
+    app.state.medical_knowledge_service = MedicalKnowledgeService(session_factory)
 
     app.state.agent_service = PatientAgentService(
         session_factory,
         app.state.mcp_registry,
         memory_service=memory_service,
+        medical_knowledge_service=app.state.medical_knowledge_service,
     )
     if app.state.memory_service is not None:
         app.state.memory_service.extractor.llm = app.state.agent_service.llm

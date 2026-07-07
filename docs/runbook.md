@@ -30,6 +30,8 @@
 | `AGENT_LLM_MODEL` | 常用 | Agent tool-calling 模型 |
 | `AGENT_LLM_API_KEY` | 常用 | Agent tool-calling API key |
 | `AGENT_LLM_BASE_URL` | 可选 | Agent tool-calling base URL |
+| `AGENT_GRAPH_ENABLED` | 可选 / 实验 | 是否启用后续 LangGraph 编排路径，默认 `false` |
+| `AGENT_GRAPH_REQUIRE_LANGGRAPH` | 可选 / 实验 | `AGENT_GRAPH_ENABLED=true` 时是否强制要求 `langgraph` 可导入，默认 `false` |
 | `QWEN_API_KEY` | 图像分析 / 语音常用 | Qwen / DashScope API key |
 | `QWEN_BASE_URL` | 可选 | 默认为 DashScope compatible-mode 地址 |
 | `QWEN_MODEL` | 可选 | MCP 路由或总结模型 |
@@ -84,6 +86,62 @@ echo $env:QWEN_API_KEY
 - `AGENT_LLM_BASE_URL`
 
 如果配置不完整，Agent 会回退到 `heuristic-fallback`。可以从响应里的 `used_models.tool_calling_mode` 判断当前是否真的走了 LangChain。
+
+### 5.3.1 LangGraph graph 模式没有启用
+
+Phase 0 仅接入 LangGraph 依赖和配置开关，默认仍走现有单 Agent 链路。优先检查：
+
+- `AGENT_GRAPH_ENABLED` 是否为 `true`
+- `AGENT_GRAPH_REQUIRE_LANGGRAPH` 是否为 `true`
+- 当前环境是否已安装 `langgraph`
+
+如果 `AGENT_GRAPH_ENABLED=true` 且 `AGENT_GRAPH_REQUIRE_LANGGRAPH=true`，但 `langgraph` 不可导入，Agent service 初始化会返回 `langgraph_dependency_missing`。如果 `AGENT_GRAPH_REQUIRE_LANGGRAPH=false`，后续 graph 路径应允许回退到旧链路。
+
+开启 LangGraph 编排后，`agent_trace.stage` 不再限定为 `preflight / tool_calling / postprocess`，还会出现 `graph_preflight / graph_planner / graph_dispatcher / graph_memory_agent / graph_patient_data_agent / graph_image_analysis_agent / graph_medical_knowledge_agent / graph_join / graph_gap_checker / graph_composer / graph_postprocess` 等节点名。
+
+Phase 3.1 起，graph dispatcher 会通过 LangGraph `Send` 将同一轮 ready task 派发到多个 worker 分支。`max_parallel_tasks` 当前在 graph state 中默认是 `4`，用于限制单轮并行任务数。worker 只返回增量 `task_results`、`worker_events`、`evidence_items`、`tool_calls` 与 `agent_trace`，由 `graph_join` 统一更新 `task_board`。
+
+Phase 3.2 起，graph 路径使用 bounded Plan-Execute-Replan 语义：
+
+- `used_models.planner_mode` 和 `used_models.replanner_mode` 显示 `llm` 或 `rule_fallback`。
+- Planner 输出的 `allowed_tools` 只表示任务意图，实际工具集合由 capability registry 求交得到 `effective_allowed_tools`。
+- PatientDataAgent 默认最多 4 步，服务端上限 5 步，只能调用患者资料、就诊、病历工具。
+- MedicalKnowledgeAgent 默认和上限都是 2 步，只暴露 `medical_knowledge.search` 与 `medical_knowledge.deep_retrieve`。
+- `graph_gap_checker` 保持旧节点名兼容，但在 Phase 3.2 中承担 ReplannerAgent 语义，并写入 `finish_reason` 与 safety 字段。
+- Composer 不绑定业务工具；证据不足时只能基于 `finish_reason` 和 `answer_constraints` 降级回答，不能自行补查。
+- Replanner returning `continue` is treated as a suggestion. If no ready task, no accepted proposed task, and no retryable required task exist, the server forces `finish_reason=degraded_answer_allowed` to avoid dispatcher idle loops.
+- ReAct workers enforce `effective_max_tool_steps` at the injected-tool layer. This applies to both LangGraph `create_react_agent` and the compatibility `bind_tools` loop, so a single model turn cannot execute extra tool calls beyond the server cap.
+- Planner task boards now fail fast on invalid `depends_on`, invalid `task_id`, mismatched task-id prefix, duplicate ids, self-dependencies, or dependency cycles; this triggers `planner_mode=rule_fallback`.
+- Replanner proposed tasks use the same id/dependency checks, but invalid proposed tasks are rejected individually and surfaced through `rejected_proposed_tasks` and `rejected_task_reasons` in trace/state.
+- Patch C 起，Planner / Replanner 不应输出内部 `task_id` 或 `depends_on`。它们只输出语义任务草稿，服务端根据 `agent + dedupe_key` 生成内部 `task_id`，并把 `depends_on_dedupe_keys` 解析为真实 `depends_on`。
+- Patch D 起，Planner / Replanner 会优先调用 `llm.with_structured_output(PlannerOutput / ReplanDecision)`。当前 Qwen 是通过 OpenAI-compatible `ChatOpenAI` 客户端接入；客户端支持 structured output 时会记录 `planner_output_mode=structured` 或 `replanner_output_mode=structured`。如果 structured 调用不可用或失败，会自动回退到当前 JSON parse 路径，并记录 `json_parse_fallback`。
+- structured output 只约束模型输出格式，不替代服务端策略。`normalize_planned_tasks`、`normalize_proposed_tasks`、capability registry、工具白名单和步数上限仍是最终可信边界。
+
+`dedupe_key` 不是自然语言摘要，而是稳定语义任务键。推荐格式：
+
+```text
+domain:purpose[:scope]
+```
+
+推荐示例：
+
+- `memory:patient_context`
+- `patient_data:latest_visit`
+- `patient_data:structured_context`
+- `image_analysis:uploaded_report`
+- `medical_knowledge:blood_pressure`
+- `safety:emergency_triage`
+
+不要这样写：
+
+- `patient_data:check_user_question_today_please`
+- `medical_knowledge:explain_the_report_and_dizziness`
+- `task_1`
+- `blood_pressure`
+
+如果 LLM 输出缺少领域前缀、像自然语言句子、重复、或引用不存在的 `depends_on_dedupe_keys`，Planner 会回退规则规划；Replanner 会拒绝对应 proposed task。
+
+如果在本地使用 SQLite 内存库运行测试，真实数据库读写不适合作为并行压力测试；项目测试以 router / node 单元测试验证 `Send` 分发和状态合并，API 测试继续覆盖各 worker 的业务闭环。生产或联调环境建议优先使用文件 SQLite 或 PostgreSQL 进行多 worker 综合请求验证。
 
 ### 5.4 长期记忆服务不可用
 

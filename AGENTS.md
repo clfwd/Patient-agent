@@ -26,6 +26,9 @@
 - SQLite：主业务库
 - PostgreSQL：长期记忆库
 - LangChain
+- 前端工作台：React 18 + TypeScript 5 + Vite 5 + Tailwind CSS 3 + `react-router-dom` + `lucide-react`
+- 仓库已包含 `components.json` 与 `shadcn/ui` 兼容别名配置
+- 当前前端实际落地的 `shared/ui` 组件仍以仓库内自建轻量 primitives 为主，尚未大规模引入官方 `shadcn/ui` 生成组件
 
 ## 代码地图
 
@@ -71,6 +74,17 @@
   - Chat session / message / context 模型
 - `app/tool_routing.py`
   - Agent 与 MCP 共用的启发式工具选择逻辑
+- `frontend/`
+  - 患者端聊天工作台前端工程
+  - 使用 Vite 构建
+  - `src/app`：页面入口与路由
+  - `src/features/chat`：消息流、输入区、工作台 hook
+  - `src/features/session`：会话侧栏
+  - `src/features/context`：右侧上下文栏
+  - `src/features/agent`：执行状态展示
+  - `src/shared/api`：前端 API 封装
+  - `src/shared/types`：前端类型
+  - `src/shared/ui`：轻量 UI primitives
 - `tests/test_agent_api.py`
   - Agent tool-calling、患者归属控制、会话恢复测试
 - `tests/test_chat_workspace_api.py`
@@ -172,6 +186,19 @@
 - 响应继续兼容 `intent` 字段，但推荐优先依赖 `tool_calls`、`agent_trace`、`final_answer`
 - `used_models.tool_calling_mode` 用于区分 `langchain_openai`、`langchain_qwen`、`custom_llm` 与 `heuristic-fallback`
 
+前端工作台约定：
+
+- 默认入口是 `frontend/`
+- 本地开发地址默认 `http://127.0.0.1:5173`
+- 工作台优先走 `POST /api/v1/agent/stream`
+- 当前流式能力是“阶段实时 + 最终答案切块推送”，不是模型 token 级真流式
+- 当前已支持：
+  - 多轮会话切换
+  - 图片附件上传与追问
+  - 结构化身份核验字段
+  - 音频回复播放器与下载
+  - 右侧 Agent 轨迹展示
+
 ## 会话与记忆约定
 
 ### 短期记忆
@@ -204,6 +231,13 @@
 - `AGENT_LLM_MODEL`
 - `AGENT_LLM_API_KEY`
 - `AGENT_LLM_BASE_URL`
+- `AGENT_GRAPH_ENABLED`
+- `AGENT_GRAPH_REQUIRE_LANGGRAPH`
+
+LangGraph 编排相关：
+
+- `AGENT_GRAPH_ENABLED` 默认 `false`，用于后续切换 LangGraph 多节点编排路径；Phase 0 仅完成依赖与兼容开关接入，默认仍走现有单 Agent 链路
+- `AGENT_GRAPH_REQUIRE_LANGGRAPH` 默认 `false`，仅在 `AGENT_GRAPH_ENABLED=true` 时生效；设为 `true` 且 `langgraph` 不可导入时，Agent service 初始化应失败并返回 `langgraph_dependency_missing`
 
 长期记忆相关：
 
@@ -241,6 +275,14 @@
 
 ```powershell
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
+```
+
+启动前端：
+
+```powershell
+cd frontend
+npm install
+npm run dev
 ```
 
 运行全部测试：

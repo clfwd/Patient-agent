@@ -8,10 +8,36 @@
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
 ```
 
+前端工作台本地开发：
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
 在线文档：
 
 - Swagger: `http://127.0.0.1:8000/docs`
 - OpenAPI: `http://127.0.0.1:8000/openapi.json`
+- 前端工作台: `http://127.0.0.1:5173`
+
+## 1.1 前端工作台技术栈
+
+当前仓库已包含 `frontend/` 前端工程，技术栈为：
+
+- React 18
+- TypeScript 5
+- Vite 5
+- Tailwind CSS 3
+- `react-router-dom`
+- `lucide-react`
+
+说明：
+
+- 仓库已包含 `components.json` 与 `shadcn/ui` 兼容别名配置
+- 当前 `frontend/src/shared/ui` 中的实际落地组件仍以仓库内自建 primitives 为主
+- 当前适合作为患者端 AI Agent 聊天工作台，而不是传统 Admin 后台
 
 ## 2. 基础数据接口
 
@@ -174,6 +200,46 @@ POST /api/v1/mcp/tools/visit.search_visits/invoke
 - `DELETE /api/v1/chat/attachments/{attachment_id}`
 
 附件上传当前使用 `multipart/form-data`，更适合前端直接上传文件。
+
+## 6.1 当前前端工程内容
+
+当前前端已落地的页面与模块包括：
+
+- `frontend/src/app`
+  - 工作台页面入口与路由
+- `frontend/src/features/session`
+  - 左侧会话侧栏
+- `frontend/src/features/chat`
+  - 消息流
+  - 输入区
+  - 身份核验区
+  - 图片上传
+  - 音频回复展示
+  - 工作台状态 hook
+- `frontend/src/features/context`
+  - 右侧患者摘要、会话状态、Agent 轨迹
+- `frontend/src/features/agent`
+  - 执行状态条
+- `frontend/src/shared/api`
+  - Agent、会话、附件 API 封装
+- `frontend/src/shared/types`
+  - 前端请求响应类型
+- `frontend/src/shared/ui`
+  - 轻量 UI primitives
+
+当前工作台交互特点：
+
+- 三栏布局
+- 多轮会话切换
+- 优先使用 `POST /api/v1/agent/stream`
+- 失败时回退到 `POST /api/v1/agent/invoke`
+- 图片会话内追问支持
+- 音频回复播放器与下载链接
+
+当前限制：
+
+- `answer.delta` 仍是最终答案切块推送，不是模型 token 级真流式
+- 当前已完成 `shadcn/ui` 兼容配置初始化，但尚未大规模使用官方生成组件
 
 ## 7. 长期记忆接口
 

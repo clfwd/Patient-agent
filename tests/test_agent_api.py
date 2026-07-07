@@ -3,11 +3,13 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 
-from app.agent.service import PatientAgentService
+from app.agent.service import AgentExecutionError, PatientAgentService
+from app.knowledge.repositories import MedicalKnowledgeRepository
 from app.main import create_app
 import app.agent.service as agent_service_module
 
@@ -157,6 +159,331 @@ class AgentApiTest(unittest.TestCase):
         self.app.state.agent_service.llm = llm
         self.app.state.agent_service.tool_calling_backend = "custom_llm"
         return llm
+
+    def _seed_medical_knowledge(self):
+        with self.app.state.SessionLocal() as session:
+            repo = MedicalKnowledgeRepository(session)
+            document = repo.create_document(
+                title="Blood Sugar Basics",
+                source="test-fixture:diabetes-education",
+                source_type="fixture",
+                content="Blood sugar refers to glucose in the blood.",
+            )
+            repo.create_chunks(
+                document.id,
+                [
+                    {
+                        "content": "Blood sugar refers to glucose in the blood and is commonly reviewed with fasting glucose or HbA1c results.",
+                        "search_text": "blood sugar glucose HbA1c fasting glucose 血糖 指标 检查",
+                    }
+                ],
+            )
+
+    def test_agent_graph_mode_defaults_to_disabled(self):
+        with patch.dict(os.environ, {}, clear=True):
+            service = PatientAgentService(
+                self.app.state.SessionLocal,
+                self.app.state.mcp_registry,
+                llm=FakeToolCallingLLM([]),
+            )
+
+        self.assertFalse(service.graph_enabled)
+        self.assertFalse(service.graph_require_langgraph)
+        self.assertEqual(service.graph_runtime_status, "disabled")
+
+    def test_agent_graph_require_langgraph_fails_when_dependency_missing(self):
+        with patch.object(agent_service_module, "LangGraphStateGraph", None):
+            with patch.dict(
+                os.environ,
+                {
+                    "AGENT_GRAPH_ENABLED": "true",
+                    "AGENT_GRAPH_REQUIRE_LANGGRAPH": "true",
+                },
+                clear=True,
+            ):
+                with self.assertRaises(AgentExecutionError) as error:
+                    PatientAgentService(
+                        self.app.state.SessionLocal,
+                        self.app.state.mcp_registry,
+                        llm=FakeToolCallingLLM([]),
+                    )
+
+        self.assertEqual(error.exception.error_code, "langgraph_dependency_missing")
+        self.assertEqual(error.exception.status_code, 500)
+
+    def test_agent_graph_mode_runs_task_board_patient_data_worker(self):
+        self._mock_audio()
+        self.app.state.agent_service.graph_enabled = True
+        self.app.state.agent_service.graph_runtime_status = "available"
+        registry = self.app.state.mcp_registry
+        call_counter = {}
+        original_invoke_tool = registry.invoke_tool
+
+        def counting_invoke(tool_name, arguments, runtime_context=None):
+            call_counter[tool_name] = call_counter.get(tool_name, 0) + 1
+            return original_invoke_tool(tool_name, arguments, runtime_context=runtime_context)
+
+        registry.invoke_tool = counting_invoke
+        self._set_fake_llm([AIMessage(content="The graph latest visit summary is ready.", tool_calls=[])])
+
+        response = self.client.post(
+            "/api/v1/agent/invoke",
+            json={
+                "message": "Summarize my latest visit.",
+                "verify_name": "Liu Yang",
+                "verify_phone": "13900000005",
+                "with_audio": True,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+
+        self.assertTrue(
+            {
+                "graph_preflight",
+                "graph_planner",
+                "graph_dispatcher",
+                "graph_memory_agent",
+                "graph_patient_data_agent",
+                "graph_join",
+                "graph_gap_checker",
+                "graph_composer",
+                "graph_postprocess",
+            }.issubset(set(body["plan"]))
+        )
+        self.assertEqual(call_counter["identity.verify_patient_identity"], 1)
+        self.assertEqual(call_counter["visit.search_visits"], 1)
+        self.assertEqual(body["tool_calls"][0]["tool_name"], "visit.search_visits")
+        self.assertIn("Found one visit", body["final_answer"])
+        self.assertEqual(body["used_models"]["graph_mode"], "available")
+        stages = {item.get("stage") for item in body["agent_trace"]}
+        self.assertTrue(
+            {
+                "graph_preflight",
+                "graph_planner",
+                "graph_dispatcher",
+                "graph_memory_agent",
+                "graph_patient_data_agent",
+                "graph_join",
+                "graph_gap_checker",
+                "graph_composer",
+                "graph_postprocess",
+            }.issubset(stages)
+        )
+        self.assertEqual(body["audio"]["audio_format"], "mp3")
+
+    def test_agent_graph_patient_data_worker_calls_visit_and_record_for_complex_question(self):
+        self.app.state.agent_service.graph_enabled = True
+        self.app.state.agent_service.graph_runtime_status = "available"
+        registry = self.app.state.mcp_registry
+        call_counter = {}
+        original_invoke_tool = registry.invoke_tool
+
+        def counting_invoke(tool_name, arguments, runtime_context=None):
+            call_counter[tool_name] = call_counter.get(tool_name, 0) + 1
+            return original_invoke_tool(tool_name, arguments, runtime_context=runtime_context)
+
+        registry.invoke_tool = counting_invoke
+        self._set_fake_llm([])
+
+        response = self.client.post(
+            "/api/v1/agent/invoke",
+            json={
+                "message": "Summarize my latest visit and medical record.",
+                "verify_name": "Liu Yang",
+                "verify_phone": "13900000005",
+                "with_audio": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+
+        self.assertEqual(call_counter["visit.search_visits"], 1)
+        self.assertEqual(call_counter["medical_record.search_records"], 1)
+        tool_names = [item["tool_name"] for item in body["tool_calls"]]
+        self.assertIn("visit.search_visits", tool_names)
+        self.assertIn("medical_record.search_records", tool_names)
+
+    def test_agent_graph_image_worker_uses_uploaded_image_tool(self):
+        self.app.state.agent_service.graph_enabled = True
+        self.app.state.agent_service.graph_runtime_status = "available"
+        registry = self.app.state.mcp_registry
+        registry.qwen_client.api_key = "mock-key"
+        registry.qwen_client.vision_model = "mock-vision-model"
+
+        def mock_analyze_case_image(image_url, case_context, patient_context=None, clinical_question=None):
+            return {
+                "is_related": True,
+                "relevance_level": "high",
+                "visible_findings": ["Right ankle image"],
+                "reasoning": "The image is highly relevant to the current ankle recovery case.",
+                "limitations": ["For test only"],
+                "suggested_follow_up": ["Combine with the in-person follow-up result"],
+            }
+
+        registry.qwen_client.analyze_case_image = mock_analyze_case_image
+        self._set_fake_llm([AIMessage(content="This image is highly relevant to the current condition.", tool_calls=[])])
+
+        response = self.client.post(
+            "/api/v1/agent/invoke",
+            json={
+                "message": "Is this uploaded image related to the current condition?",
+                "verify_name": "Liu Yang",
+                "verify_phone": "13900000005",
+                "image_id": self.image["id"],
+                "with_audio": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+
+        self.assertIn("graph_image_analysis_agent", body["plan"])
+        self.assertEqual(body["tool_calls"][0]["tool_name"], "image.analyze_uploaded_image")
+        stages = {item.get("stage") for item in body["agent_trace"]}
+        self.assertIn("graph_image_analysis_agent", stages)
+
+    def test_agent_graph_high_risk_question_adds_warning_note(self):
+        self.app.state.agent_service.graph_enabled = True
+        self.app.state.agent_service.graph_runtime_status = "available"
+        self._set_fake_llm([AIMessage(content="Blood pressure can be affected by many factors.", tool_calls=[])])
+
+        response = self.client.post(
+            "/api/v1/agent/invoke",
+            json={
+                "message": "I have chest pain. What is blood pressure?",
+                "verify_name": "Liu Yang",
+                "verify_phone": "13900000005",
+                "with_audio": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+
+        self.assertIn("graph_medical_knowledge_agent", body["plan"])
+        self.assertIn("较高风险", body["final_answer"])
+
+    def test_agent_graph_missing_dependency_falls_back_to_legacy_pipeline(self):
+        self.app.state.agent_service.graph_enabled = True
+        self.app.state.agent_service.graph_runtime_status = "missing_dependency_fallback"
+        self._set_fake_llm(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "patient.get_patient_profile",
+                            "args": {},
+                            "id": "call_profile_fallback",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                AIMessage(content="Fallback profile summary is ready.", tool_calls=[]),
+            ]
+        )
+
+        response = self.client.post(
+            "/api/v1/agent/invoke",
+            json={
+                "message": "Show my patient profile.",
+                "verify_name": "Liu Yang",
+                "verify_phone": "13900000005",
+                "with_audio": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+
+        self.assertEqual(body["plan"], ["preflight", "tool_calling", "postprocess"])
+        self.assertEqual(body["used_models"]["graph_mode"], "missing_dependency_fallback")
+        stages = {item.get("stage") for item in body["agent_trace"]}
+        self.assertNotIn("graph_router", stages)
+        self.assertIn("preflight", stages)
+
+    def test_agent_graph_mode_identity_failure_keeps_403_semantics(self):
+        self.app.state.agent_service.graph_enabled = True
+        self.app.state.agent_service.graph_runtime_status = "available"
+
+        response = self.client.post(
+            "/api/v1/agent/invoke",
+            json={
+                "message": "Summarize my latest visit.",
+                "patient_id": self.patient["id"],
+                "verify_name": "Wrong Name",
+                "verify_phone": "13900000005",
+                "with_audio": False,
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.headers["X-Error-Code"], "identity_verification_failed")
+
+    def test_agent_graph_medical_knowledge_adds_source_summary(self):
+        self._seed_medical_knowledge()
+        self.app.state.agent_service.graph_enabled = True
+        self.app.state.agent_service.graph_runtime_status = "available"
+        self._set_fake_llm([AIMessage(content="Blood sugar is glucose in the blood.", tool_calls=[])])
+
+        response = self.client.post(
+            "/api/v1/agent/invoke",
+            json={
+                "message": "What is blood sugar?",
+                "verify_name": "Liu Yang",
+                "verify_phone": "13900000005",
+                "with_audio": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+
+        self.assertIn("graph_medical_knowledge_agent", body["plan"])
+        self.assertIn("Blood Sugar Basics", body["final_answer"])
+        self.assertIn("参考来源", body["final_answer"])
+        self.assertEqual(body["used_models"]["knowledge_retrieval_mode"], "keyword")
+        stages = {item.get("stage") for item in body["agent_trace"]}
+        self.assertIn("graph_medical_knowledge_agent", stages)
+
+    def test_agent_graph_medical_knowledge_no_hit_does_not_fake_source(self):
+        self._seed_medical_knowledge()
+        self.app.state.agent_service.graph_enabled = True
+        self.app.state.agent_service.graph_runtime_status = "available"
+        self._set_fake_llm([AIMessage(content="No local source was found for this topic.", tool_calls=[])])
+
+        response = self.client.post(
+            "/api/v1/agent/invoke",
+            json={
+                "message": "What is asthma?",
+                "verify_name": "Liu Yang",
+                "verify_phone": "13900000005",
+                "with_audio": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+
+        self.assertIn("graph_medical_knowledge_agent", body["plan"])
+        self.assertNotIn("参考来源", body["final_answer"])
+        self.assertEqual(body["used_models"]["knowledge_retrieval_mode"], "keyword")
+
+    def test_agent_legacy_path_does_not_trigger_medical_knowledge(self):
+        self._seed_medical_knowledge()
+        self._set_fake_llm([AIMessage(content="Blood sugar is glucose in the blood.", tool_calls=[])])
+
+        response = self.client.post(
+            "/api/v1/agent/invoke",
+            json={
+                "message": "What is blood sugar?",
+                "verify_name": "Liu Yang",
+                "verify_phone": "13900000005",
+                "with_audio": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+
+        self.assertNotIn("graph_medical_knowledge", body["plan"])
+        self.assertNotIn("参考来源", body["final_answer"])
+        self.assertEqual(body["used_models"]["knowledge_retrieval_mode"], "disabled")
 
     def test_agent_recent_visit_uses_search_tool_with_limit_one_and_single_identity_check(self):
         self._mock_audio()

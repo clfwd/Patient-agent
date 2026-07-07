@@ -36,9 +36,15 @@ try:
 except ImportError:  # pragma: no cover
     ChatOpenAI = None
 
+try:
+    from langgraph.graph import StateGraph as LangGraphStateGraph
+except ImportError:  # pragma: no cover
+    LangGraphStateGraph = None
+
 
 MAX_TOOL_CALLS = 6
 DEFAULT_CONTEXT_MESSAGE_LIMIT = 6
+TRUE_ENV_VALUES = ("1", "true", "yes", "on")
 IMAGE_REFERENCE_KEYWORDS = (
     "这张图",
     "这个图",
@@ -136,12 +142,25 @@ class ChatSessionRecorder(object):
 class PatientAgentService(object):
     """Single-agent orchestration around generalized MCP tools."""
 
-    def __init__(self, session_factory, mcp_registry, model=None, llm=None, memory_service=None):
+    def __init__(
+        self,
+        session_factory,
+        mcp_registry,
+        model=None,
+        llm=None,
+        memory_service=None,
+        medical_knowledge_service=None,
+    ):
         self.session_factory = session_factory
         self.mcp_registry = mcp_registry
         self.memory_service = memory_service
+        self.medical_knowledge_service = medical_knowledge_service
         self._http_client = None
         self._http_async_client = None
+        self.graph_enabled = self._env_flag("AGENT_GRAPH_ENABLED", default=False)
+        self.graph_require_langgraph = self._env_flag("AGENT_GRAPH_REQUIRE_LANGGRAPH", default=False)
+        self.graph_available = LangGraphStateGraph is not None
+        self.graph_runtime_status = self._resolve_graph_runtime_status()
         self.requested_model = model
         self.model_name = model or os.getenv("AGENT_LLM_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4o"
         self.tool_calling_backend = None
@@ -149,6 +168,26 @@ class PatientAgentService(object):
         self.llm = llm or self._build_llm()
         if llm is not None and self.tool_calling_backend is None:
             self.tool_calling_backend = "custom_llm"
+
+    @staticmethod
+    def _env_flag(name, default=False):
+        raw_value = os.getenv(name)
+        if raw_value is None:
+            return default
+        return raw_value.strip().lower() in TRUE_ENV_VALUES
+
+    def _resolve_graph_runtime_status(self):
+        if not self.graph_enabled:
+            return "disabled"
+        if self.graph_available:
+            return "available"
+        if self.graph_require_langgraph:
+            raise AgentExecutionError(
+                "LangGraph mode requires the langgraph package, but it is not installed.",
+                error_code="langgraph_dependency_missing",
+                status_code=500,
+            )
+        return "missing_dependency_fallback"
 
     def _build_llm(self):
         if ChatOpenAI is None:
@@ -280,22 +319,8 @@ class PatientAgentService(object):
             resolved_image_id = resolved[0].get("image_id")
         return resolved, resolved_image_id
 
-    def invoke(self, request, event_callback: Optional[Callable[[str, dict], None]] = None):
-        recorder = ChatSessionRecorder(self.session_factory)
-        session_title = (request.metadata or {}).get("session_title")
-        chat_session = recorder.ensure_session(
-            session_id=request.session_id,
-            patient_id=request.patient_id,
-            title=session_title,
-            seed_message=request.message,
-        )
-        attachments, resolved_image_id = self._resolve_request_attachments(
-            chat_session.id,
-            request.attachments,
-            message=request.message,
-            image_id=request.image_id,
-        )
-        state = AgentState(
+    def _build_initial_state(self, request, recorder, chat_session, attachments, resolved_image_id, event_callback=None):
+        return AgentState(
             run_id=uuid.uuid4().hex,
             message=request.message,
             session_id=chat_session.id,
@@ -311,51 +336,62 @@ class PatientAgentService(object):
             with_audio=request.with_audio,
             metadata=request.metadata,
             conversation_history=[],
+            conversation_context_summary={},
             message_recorder=recorder,
             event_callback=event_callback,
             plan=["preflight", "tool_calling", "postprocess"],
+            task_board=[],
+            current_task=None,
+            dispatched_tasks=[],
+            task_results={},
+            worker_events=[],
+            proposed_tasks=[],
+            suggested_followups=[],
+            evidence_items=[],
+            risk_flags=[],
+            safety_level="normal",
+            urgent_flags=[],
+            answer_constraints=[],
+            forbidden_claims=[],
+            finish_reason=None,
+            join_summary={},
+            need_more_tasks=False,
+            dispatch_round=0,
+            max_dispatch_rounds=2,
+            max_tasks=8,
+            max_new_tasks_per_round=2,
+            max_parallel_tasks=4,
             steps=[],
             tool_calls=[],
             agent_trace=[],
             attachments_result=attachments,
+            knowledge_hits=[],
+            knowledge_sources_text=None,
+            planner_mode=None,
+            planner_output_mode=None,
+            replanner_mode=None,
+            replanner_output_mode=None,
             errors=[],
         )
-        if event_callback is not None:
-            event_callback(
-                "session.created",
-                {
-                    "session_id": chat_session.id,
-                    "run_id": state.get("run_id"),
-                },
-            )
 
-        try:
-            state.update(self._preflight_node(state))
-            state["conversation_history"] = self._load_conversation_history(chat_session.id)
-            recorder.record_message(
-                role="user",
-                message_type="user_input",
-                content=request.message,
-                payload={
-                    "metadata": request.metadata,
-                    "image_id": resolved_image_id,
-                    "attachments": attachments,
-                },
-                visible_in_context=True,
-            )
-            state.update(self._tool_calling_node(state))
-            state.update(self._postprocess_node(state))
-        except AgentExecutionError as exc:
-            recorder.record_message(
-                role="assistant",
-                message_type="error",
-                content=exc.detail,
-                payload={"error_code": exc.error_code},
-                visible_in_context=False,
-            )
-            raise
+    def _record_user_message(self, state):
+        recorder = state.get("message_recorder")
+        if recorder is None:
+            return None
+        return recorder.record_message(
+            role="user",
+            message_type="user_input",
+            content=state.get("message"),
+            payload={
+                "metadata": state.get("metadata") or {},
+                "image_id": state.get("image_id"),
+                "attachments": state.get("attachments") or [],
+            },
+            visible_in_context=True,
+        )
 
-        response = {
+    def _build_response(self, state):
+        return {
             "session_id": state.get("session_id"),
             "run_id": state.get("run_id"),
             "intent": self._infer_intent(state),
@@ -372,8 +408,16 @@ class PatientAgentService(object):
                 "tool_calling_mode": self.tool_calling_backend if state.get("tool_calling_mode") == "llm" else "heuristic-fallback",
                 "vision": self.mcp_registry.qwen_client.vision_model if state.get("image_analysis") else None,
                 "speech": self.mcp_registry.tts_service.model if state.get("audio") else None,
+                "graph_mode": self.graph_runtime_status,
+                "knowledge_retrieval_mode": state.get("knowledge_retrieval_mode") or "disabled",
+                "planner_mode": state.get("planner_mode"),
+                "planner_output_mode": state.get("planner_output_mode"),
+                "replanner_mode": state.get("replanner_mode"),
+                "replanner_output_mode": state.get("replanner_output_mode"),
             },
         }
+
+    def _persist_final_answer(self, recorder, response):
         recorder.record_message(
             role="assistant",
             message_type="final_answer",
@@ -386,6 +430,63 @@ class PatientAgentService(object):
             },
             visible_in_context=True,
         )
+
+    def _run_legacy_pipeline(self, state):
+        current_state = dict(state)
+        current_state.update(self._preflight_node(current_state))
+        current_state["conversation_history"] = self._load_conversation_history(current_state.get("session_id"))
+        self._record_user_message(current_state)
+        current_state.update(self._tool_calling_node(current_state))
+        current_state.update(self._postprocess_node(current_state))
+        return current_state
+
+    def _run_graph_pipeline(self, state):
+        from app.agent.graph.graph import run_agent_graph
+
+        return run_agent_graph(self, state)
+
+    def invoke(self, request, event_callback: Optional[Callable[[str, dict], None]] = None):
+        recorder = ChatSessionRecorder(self.session_factory)
+        session_title = (request.metadata or {}).get("session_title")
+        chat_session = recorder.ensure_session(
+            session_id=request.session_id,
+            patient_id=request.patient_id,
+            title=session_title,
+            seed_message=request.message,
+        )
+        attachments, resolved_image_id = self._resolve_request_attachments(
+            chat_session.id,
+            request.attachments,
+            message=request.message,
+            image_id=request.image_id,
+        )
+        state = self._build_initial_state(request, recorder, chat_session, attachments, resolved_image_id, event_callback)
+        if event_callback is not None:
+            event_callback(
+                "session.created",
+                {
+                    "session_id": chat_session.id,
+                    "run_id": state.get("run_id"),
+                },
+            )
+
+        try:
+            if self.graph_runtime_status == "available":
+                state = self._run_graph_pipeline(state)
+            else:
+                state = self._run_legacy_pipeline(state)
+        except AgentExecutionError as exc:
+            recorder.record_message(
+                role="assistant",
+                message_type="error",
+                content=exc.detail,
+                payload={"error_code": exc.error_code},
+                visible_in_context=False,
+            )
+            raise
+
+        response = self._build_response(state)
+        self._persist_final_answer(recorder, response)
         if self.memory_service is not None:
             self.memory_service.maybe_create_extraction_job(
                 session_id=state.get("session_id"),
@@ -615,7 +716,14 @@ class PatientAgentService(object):
         current_state["patient_id"] = patient.get("id")
         current_state["patient_no"] = patient.get("patient_no")
         current_state["image_context"] = image_context
-        if self.memory_service is not None:
+        if current_state.get("skip_long_term_memory_preflight"):
+            recalled = {
+                "profiles": [],
+                "dense_hits": [],
+                "keyword_hits": [],
+                "fused_hits": [],
+            }
+        elif self.memory_service is not None:
             try:
                 recalled = self.memory_service.recall_long_term_memories(patient.get("id"), current_state.get("message") or "")
             except Exception:
@@ -917,6 +1025,9 @@ class PatientAgentService(object):
         )
 
         final_answer = (state.get("final_answer") or "").strip() or self._build_fallback_answer(current_state)
+        knowledge_sources_text = (state.get("knowledge_sources_text") or "").strip()
+        if knowledge_sources_text and knowledge_sources_text not in final_answer:
+            final_answer = "{0}\n\n{1}".format(final_answer, knowledge_sources_text)
         current_state["final_answer"] = final_answer
 
         audio = None
