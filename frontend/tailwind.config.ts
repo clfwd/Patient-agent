@@ -5,25 +5,22 @@ export default {
   theme: {
     extend: {
       colors: {
-        background: "#f5f4ef",
-        surface: "#fcfbf7",
-        foreground: "#171717",
-        muted: "#6f6a60",
-        line: "#e8e2d6",
-        accent: "#1f6feb",
-        accentSoft: "#e8f0ff",
-        warm: "#efe7d8",
+        background: "#ffffff",
+        surface: "#fafafa",
+        foreground: "#1f1f1f",
+        muted: "#747474",
+        line: "#e8e8e8",
+        accent: "#456a8d",
+        accentSoft: "#eef3f7",
+        warm: "#f3f4f6",
       },
       borderRadius: {
-        xl: "1rem",
-        "2xl": "1.5rem",
+        xl: "0.75rem",
+        "2xl": "1rem",
       },
       fontFamily: {
-        sans: ["'Segoe UI'", "system-ui", "sans-serif"],
+        sans: ["Inter", "-apple-system", "BlinkMacSystemFont", "'Segoe UI'", "'PingFang SC'", "'Microsoft YaHei'", "sans-serif"],
         mono: ["'JetBrains Mono'", "monospace"],
-      },
-      boxShadow: {
-        panel: "0 18px 48px rgba(21, 24, 28, 0.06)",
       },
     },
   },

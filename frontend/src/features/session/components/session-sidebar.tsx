@@ -1,62 +1,33 @@
-import { MessageSquarePlus } from "lucide-react";
+import { MessageSquarePlus, X } from "lucide-react";
 
 import { Button } from "@/shared/ui/button";
-import { Panel } from "@/shared/ui/panel";
 import type { SessionItem } from "@/shared/types/agent";
 
 type SessionSidebarProps = {
-  sessions: SessionItem[];
-  activeSessionId?: string;
-  loading: boolean;
-  onSelectSession: (id: string) => void;
-  onNewSession: () => void;
+  sessions: SessionItem[]; activeSessionId?: string; loading: boolean; mobileOpen: boolean;
+  onSelectSession: (id: string) => void; onNewSession: () => void; onCloseMobile: () => void;
 };
 
-export function SessionSidebar({
-  sessions,
-  activeSessionId,
-  loading,
-  onSelectSession,
-  onNewSession,
-}: SessionSidebarProps) {
-  return (
-    <Panel className="hidden h-full min-h-0 w-[300px] shrink-0 flex-col p-4 lg:flex">
-      <div className="mb-5 shrink-0">
-        <p className="text-xs uppercase tracking-[0.24em] text-muted">Patient Agent</p>
-        <h1 className="mt-3 text-2xl font-semibold tracking-tight">患者端智能工作台</h1>
-      </div>
+function groupSessions(sessions: SessionItem[]) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1);
+  const groups: Array<[string, SessionItem[]]> = [["今天", []], ["昨天", []], ["更早", []]];
+  sessions.forEach((session) => {
+    const updated = new Date(session.updated_at); updated.setHours(0, 0, 0, 0);
+    groups[updated >= today ? 0 : updated >= yesterday ? 1 : 2][1].push(session);
+  });
+  return groups.filter(([, items]) => items.length);
+}
 
-      <Button className="mb-5 w-full shrink-0 justify-start gap-2" onClick={onNewSession}>
-        <MessageSquarePlus className="h-4 w-4" />
-        新对话
-      </Button>
-
-      <div className="mb-3 flex shrink-0 items-center justify-between text-xs uppercase tracking-[0.22em] text-muted">
-        <span>会话</span>
-        {loading ? <span>加载中</span> : <span>{sessions.length}</span>}
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-        <div className="flex flex-col gap-2">
-          {sessions.map((session) => (
-            <button
-              key={session.id}
-              className={`rounded-[22px] border px-3 py-3 text-left transition ${
-                session.id === activeSessionId
-                  ? "border-foreground/15 bg-foreground text-white"
-                  : "border-transparent bg-white/60 hover:border-line hover:bg-white"
-              }`}
-              onClick={() => onSelectSession(session.id)}
-              type="button"
-            >
-              <div className="line-clamp-1 text-sm font-medium">{session.title || "未命名会话"}</div>
-              <div className={`mt-1 line-clamp-2 text-xs ${session.id === activeSessionId ? "text-white/75" : "text-muted"}`}>
-                {session.last_message_preview || "等待第一条消息"}
-              </div>
-            </button>
-          ))}
-        </div>
-      </div>
-    </Panel>
+export function SessionSidebar({ sessions, activeSessionId, loading, mobileOpen, onSelectSession, onNewSession, onCloseMobile }: SessionSidebarProps) {
+  const groups = groupSessions(sessions);
+  const content = (
+    <>
+      <div className="flex items-center justify-between px-2 pb-5 pt-1"><div><p className="text-xs font-medium text-muted">患者智能助手</p><h1 className="mt-1 text-[15px] font-semibold text-foreground">会话</h1></div><button aria-label="关闭会话列表" className="rounded-md p-1.5 text-muted hover:bg-black/[0.04] md:hidden" onClick={onCloseMobile} type="button"><X className="h-4 w-4" /></button></div>
+      <Button className="mb-5 w-full justify-start gap-2" onClick={onNewSession}><MessageSquarePlus className="h-4 w-4" />新对话</Button>
+      <div className="min-h-0 flex-1 overflow-y-auto"><div className="space-y-5 px-1">{loading ? <p className="px-2 text-sm text-muted">加载会话中…</p> : groups.length ? groups.map(([label, items]) => <section key={label}><p className="mb-1.5 px-2 text-xs font-medium text-muted">{label}</p><div className="space-y-0.5">{items.map((session) => <button key={session.id} className={`w-full rounded-md px-2.5 py-2 text-left text-sm transition ${session.id === activeSessionId ? "bg-[#e9eaec] font-medium text-foreground" : "text-foreground hover:bg-black/[0.04]"}`} onClick={() => { onSelectSession(session.id); onCloseMobile(); }} type="button"><span className="block truncate">{session.title || "未命名会话"}</span></button>)}</div></section>) : <p className="px-2 text-sm leading-6 text-muted">还没有会话。发送第一条消息后，会话会显示在这里。</p>}</div></div>
+    </>
   );
+
+  return <><aside className="hidden h-full w-[264px] shrink-0 flex-col border-r border-line bg-[#f7f7f8] p-3 md:flex">{content}</aside>{mobileOpen ? <div className="fixed inset-0 z-40 md:hidden"><button aria-label="关闭会话列表" className="absolute inset-0 bg-black/20" onClick={onCloseMobile} type="button" /><aside className="relative flex h-full w-[280px] flex-col bg-[#f7f7f8] p-3 shadow-xl">{content}</aside></div> : null}</>;
 }

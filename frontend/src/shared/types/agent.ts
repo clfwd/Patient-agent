@@ -55,6 +55,7 @@ export type AgentTrace = {
   event: string;
   status: "started" | "completed" | "failed" | string;
   detail: string;
+  error?: string;
   created_at?: string;
 };
 

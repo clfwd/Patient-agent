@@ -44,6 +44,7 @@ function mapStoredMessages(messages: StoredMessage[]): ChatMessage[] {
 export function useAgentWorkspace(initialSessionId?: string) {
   const navigate = useNavigate();
   const streamingSessionIdRef = useRef<string | undefined>();
+  const lastFailedRequestRef = useRef<Parameters<typeof streamAgent>[0] | undefined>();
 
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(true);
@@ -174,6 +175,7 @@ export function useAgentWorkspace(initialSessionId?: string) {
         with_audio: withAudio,
         metadata: {},
       };
+      lastFailedRequestRef.current = payload;
 
       setDraft("");
       setDraftAttachments((current) => {
@@ -181,44 +183,7 @@ export function useAgentWorkspace(initialSessionId?: string) {
         return [];
       });
 
-      try {
-        await streamAgent(payload, {
-          onSessionCreated: (sessionId, runId) => {
-            streamingSessionIdRef.current = sessionId;
-            setActiveSessionId(sessionId);
-            setActiveSession((current) => ({
-              id: sessionId,
-              patient_id: current?.patient_id ?? null,
-              title: current?.title ?? pendingUserMessage.content,
-              status: "active",
-              created_at: current?.created_at ?? new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-              last_message_preview: null,
-            }));
-            setRunState((current) => ({ ...current, mode: "streaming", runId }));
-            navigate(`/sessions/${sessionId}`, { replace: true });
-          },
-          onPhase: (trace) => {
-            setRunState((current) => ({
-              ...current,
-              mode: "streaming",
-              stages: [...current.stages, trace],
-            }));
-          },
-          onAnswerDelta: (delta) => {
-            setRunState((current) => ({ ...current, mode: "streaming" }));
-            setMessages((current) =>
-              current.map((item) => (item.id === pendingAssistantId ? { ...item, content: `${item.content}${delta}` } : item)),
-            );
-          },
-          onAnswerDone: (response) => {
-            finishAssistantMessage(pendingAssistantId, response);
-          },
-        });
-      } catch {
-        const fallback = await invokeAgent(payload);
-        finishAssistantMessage(pendingAssistantId, fallback);
-      }
+      await executeAgent(payload, pendingAssistantId, pendingUserMessage.content);
     } catch (error) {
       const message = error instanceof Error ? error.message : "发送失败";
       streamingSessionIdRef.current = undefined;
@@ -229,8 +194,59 @@ export function useAgentWorkspace(initialSessionId?: string) {
     }
   }
 
+  async function executeAgent(payload: Parameters<typeof streamAgent>[0], pendingAssistantId: string, fallbackTitle: string) {
+    try {
+      await streamAgent(payload, {
+        onSessionCreated: (sessionId, runId) => {
+          streamingSessionIdRef.current = sessionId;
+          lastFailedRequestRef.current = { ...payload, session_id: sessionId };
+          setActiveSessionId(sessionId);
+          setActiveSession((current) => ({
+            id: sessionId,
+            patient_id: current?.patient_id ?? null,
+            title: current?.title ?? fallbackTitle,
+            status: "active",
+            created_at: current?.created_at ?? new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            last_message_preview: null,
+          }));
+          setRunState((current) => ({ ...current, mode: "streaming", runId }));
+          navigate(`/sessions/${sessionId}`, { replace: true });
+        },
+        onPhase: (trace) => {
+          setRunState((current) => ({ ...current, mode: "streaming", stages: [...current.stages, trace] }));
+        },
+        onAnswerDelta: (delta) => {
+          setRunState((current) => ({ ...current, mode: "streaming" }));
+          setMessages((current) => current.map((item) => (item.id === pendingAssistantId ? { ...item, content: `${item.content}${delta}` } : item)));
+        },
+        onAnswerDone: (response) => finishAssistantMessage(pendingAssistantId, response),
+      });
+    } catch {
+      const fallback = await invokeAgent(lastFailedRequestRef.current ?? payload);
+      finishAssistantMessage(pendingAssistantId, fallback);
+    }
+  }
+
+  async function retryLastMessage() {
+    const payload = lastFailedRequestRef.current;
+    if (!payload || runState.mode === "submitting" || runState.mode === "streaming") return;
+    const pendingAssistantId = crypto.randomUUID();
+    setMessages((current) => [...current, { id: pendingAssistantId, role: "assistant", content: "", status: "streaming" }]);
+    setRunState({ mode: "submitting", stages: [] });
+    try {
+      await executeAgent(payload, pendingAssistantId, payload.message);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "发送失败";
+      streamingSessionIdRef.current = undefined;
+      setRunState({ mode: "error", stages: [], error: message });
+      setMessages((current) => current.map((item) => (item.id === pendingAssistantId ? { ...item, content: message, status: "error" } : item)));
+    }
+  }
+
   function finishAssistantMessage(messageId: string, response: AgentInvokeResponse) {
     streamingSessionIdRef.current = undefined;
+    lastFailedRequestRef.current = undefined;
     setRunState({
       mode: "success",
       runId: response.run_id,
@@ -289,6 +305,7 @@ export function useAgentWorkspace(initialSessionId?: string) {
       addDraftFiles,
       removeDraftAttachment,
       submitMessage,
+      retryLastMessage,
       runState,
       resetWorkspace,
     }),
